@@ -97,22 +97,3 @@ class ClusterWorker:
                 return registration_response["work_fn"]
             # TODO: Retry until successful or the worker is shut down
             raise RuntimeError()
-
-
-def main(args):
-    worker = ClusterWorker(args.data_port, args.command_port)
-    trio.run(worker.run,
-             args.server_hostname,
-             args.registration_port,
-             args.registration_key)
-
-
-
-if __name__ == "__main__":
-    parser = ArgumentParser()
-    parser.add_argument("registration_key")
-    parser.add_argument("--server-hostname", default="localhost")
-    parser.add_argument("--registration-port", type=int, default=C.DEFAULT_REGISTRATION_PORT)
-    parser.add_argument("--data-port", type=int, default=C.DEFAULT_DATA_PORT)
-    parser.add_argument("--command-port", type=int, default=C.DEFAULT_COMMAND_PORT)
-    main(parser.parse_args())

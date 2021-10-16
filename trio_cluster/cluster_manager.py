@@ -105,21 +105,3 @@ class ClusterManager:
             msg = await command_stream.receive_some()
             assert Status.from_bytes(msg) == Status.Success
             print("Received heartbeat")
-
-
-def main(args):
-    server = ClusterManager(args.registration_key,
-                            args.registration_port,
-                            args.heartbeat_period,
-                            args.heartbeat_timeout)
-    trio.run(server.listen)
-
-
-if __name__ == "__main__":
-    parser = ArgumentParser()
-    parser.add_argument("registration_key")
-    parser.add_argument("--registration-port", type=int, default=C.DEFAULT_REGISTRATION_PORT)
-    parser.add_argument("--heartbeat-period", type=int, default=C.DEFAULT_HEARTBEAT_PERIOD)
-    parser.add_argument("--heartbeat-timeout", type=int, default=C.DEFAULT_HEARTBEAT_TIMEOUT)
-
-    main(parser.parse_args())

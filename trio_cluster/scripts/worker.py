@@ -2,8 +2,8 @@ from argparse import ArgumentParser
 
 import trio
 
-from . import constants as C
-from .cluster_worker import ClusterWorker
+from .. import constants as C
+from ..cluster_worker import ClusterWorker
 
 
 def run(args):
