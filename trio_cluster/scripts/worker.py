@@ -18,9 +18,9 @@ def main():
     parser = ArgumentParser()
     parser.add_argument("registration_key")
     parser.add_argument("--server-hostname", default="localhost")
-    parser.add_argument("--registration-port", type=int, default=C.DEFAULT_REGISTRATION_PORT)
-    parser.add_argument("--data-port", type=int, default=C.DEFAULT_DATA_PORT)
-    parser.add_argument("--command-port", type=int, default=C.DEFAULT_COMMAND_PORT)
+    parser.add_argument("-r", "--registration-port", type=int, default=C.DEFAULT_REGISTRATION_PORT)
+    parser.add_argument("-c", "--command-port", type=int, default=C.DEFAULT_COMMAND_PORT)
+    parser.add_argument("-d", "--data-port", type=int, default=C.DEFAULT_DATA_PORT)
     run(parser.parse_args())
 
 

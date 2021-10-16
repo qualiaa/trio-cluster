@@ -17,7 +17,7 @@ def run(args):
 def main():
     parser = ArgumentParser()
     parser.add_argument("registration_key")
-    parser.add_argument("--registration-port", type=int, default=C.DEFAULT_REGISTRATION_PORT)
+    parser.add_argument("-r", "--registration-port", type=int, default=C.DEFAULT_REGISTRATION_PORT)
     parser.add_argument("--heartbeat-period", type=int, default=C.DEFAULT_HEARTBEAT_PERIOD)
     parser.add_argument("--heartbeat-timeout", type=int, default=C.DEFAULT_HEARTBEAT_TIMEOUT)
 
