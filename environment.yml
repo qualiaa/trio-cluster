@@ -1,0 +1,27 @@
+name: trio-cluster
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python>=3.9
+  - trio
+  - cloudpickle
+  - pytest-trio
+  - pytest
+  - hypothesis
+  - tox
+  - pylint
+  - flake8
+  - ipython
+  - ptvsd>=4.2
+  - epc
+  - python-lsp-server[all]
+  - black
+  - isort
+  - autoflake
+  - readline
+  - pip
+  - pip:
+    - trio-parallel
+    - trio-util
+
