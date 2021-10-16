@@ -11,11 +11,11 @@ from . import utils
 from .constants import Command, Status
 
 from .work_fn import work_fn
-from .worker import _WorkerHandle
+from .cluster_worker import _WorkerHandle
 
 
 class A():
-    def __call__():
+    def __call__(self):
         return itertools.islice(itertools.count(), 500000000)
 
 
