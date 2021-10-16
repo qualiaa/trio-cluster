@@ -2,7 +2,10 @@
 name = "trio-cluster-example"
 version = "0.1.0"
 description = "A simple TCP supervisor-worker implementation in trio."
-authors = ["Jamie Bayne <jamiebayne@hotmail.com"]
+authors = ["Jamie Bayne <jamiebayne@hotmail.com>"]
+packages = [
+    { include = "trio_cluster" }
+]
 
 [build-system]
 requires = ["poetry-core>=1.0.0"]
