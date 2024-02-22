@@ -4,9 +4,8 @@ from base64 import b64encode, b64decode
 from itertools import count
 
 _unique_port = count(5757)
-DEFAULT_REGISTRATION_PORT = next(_unique_port)
-DEFAULT_COMMAND_PORT = next(_unique_port)
-DEFAULT_DATA_PORT = next(_unique_port)
+DEFAULT_SERVER_PORT = next(_unique_port)
+DEFAULT_PEER_PORT = next(_unique_port)
 
 DEFAULT_HEARTBEAT_PERIOD = 3
 DEFAULT_HEARTBEAT_TIMEOUT = 30
@@ -41,7 +40,8 @@ _unique = count()
 
 class Command(MessageType):
     Shutdown = next(_unique)
-    Heartbeat = next(_unique)
+    NewPeer = next(_unique)
+    RemovePeer = next(_unique)
 
 
 class Status(MessageType):

@@ -1,99 +1,114 @@
-import json
-from argparse import ArgumentParser
-from copy import deepcopy
+import dataclasses
 from dataclasses import dataclass
-from functools import partial
+from uuid import UUID, uuid4
 
+from . import utils
 import cloudpickle as cpkl
+import msgpack
 import trio
 import trio_parallel
-import trio_util
 
-from . import constants as C
-from . import utils
 from .constants import Command, Status
 
 
 @dataclass
-class _WorkerHandle:
+class _Worker:
+    uid: UUID
     hostname: str
-    command_port: int
-    data_port: int
+    port: int
 
     def __hash__(self):
-        return hash((self.hostname, self.command_port, self.data_port))
+        return hash(self.uid)
 
     @classmethod
     def from_dict(cls, d):
-        return cls(**d)
+        return cls(**d | {"uid": UUID(bytes=d["uid"])})
 
     def to_dict(self):
-        return deepcopy(self.__dict__)
+        return dataclasses.asdict(self) | {"uid": self.uid.bytes}
 
 
 class ClusterWorker:
-    def __init__(self, data_port, command_port):
-        # NOTE: The hostname will be overwritten by the host on registration
-        self._handle = _WorkerHandle("localhost", command_port, data_port)
+    def __init__(self, port):
+        self._uid = uuid4()
+        self._hostname = "localhost"
+        self._port = port
+        self._peers = {}
 
-    async def run(self, server_hostname, registration_port, registration_key):
-        work_fn = await self.register(server_hostname, registration_port, registration_key)
+    async def run(self, server_hostname, server_port, registration_key):
+        work_fn, server_stream = await self.register(server_hostname, server_port, registration_key)
 
         async with trio.open_nursery() as nursery:
-            nursery.start_soon(utils.tcp_accept_one,
-                               partial(self._process_commands, cancel_scope=nursery.cancel_scope),
-                               self._handle.command_port)
+            nursery.start_soon(utils.every, 2, lambda: print(f"I'm alive: {self._peers}\n"))
             nursery.start_soon(self.do_work, work_fn)
+            await self._process_commands(server_stream, cancel_scope=nursery.cancel_scope)
         print("Client done")
 
     async def do_work(self, fn):
-        print("Starting work")
-        await trio_parallel.run_sync(fn, cancellable=True)
-        print("Finished work")
-        return "Result"
+        while True:
+            print("Starting work")
+            await trio_parallel.run_sync(fn, cancellable=True)
+            print("Finished work")
 
-    async def _process_commands(self, command_stream, cancel_scope):
+    async def _process_commands(self, server_stream, cancel_scope):
         print ("Waiting for commands")
-        async with command_stream:
-            async for msg in command_stream:
+        async with server_stream:
+            async for msg in server_stream:
                 try:
-                    msg = json.loads(msg)
-                    command = Command.from_b64(msg["command"])
-                except json.JSONDecodeError:
-                    print(f"Invalid JSON received:", msg)
+                    msg = msgpack.loads(msg)
+                    payload = msg.get("payload")
+                except Exception:
+                    print("Invalid message received")
                     continue
+                try:
+                    command = Command.from_b64(msg["command"])
                 except ValueError:
                     print(f"Invalid command received:", msg["command"])
                     continue
 
-                if command == Command.Heartbeat:
-                    print("Heartbeat received")
-                    peers = set(_WorkerHandle.from_dict(w) for w in msg["data"])
-                    self._peers = peers - {self._handle}
-                    await command_stream.send_all(Status.Success.to_bytes())
-                    print(self._peers)
-
-                elif command == Command.Shutdown:
-                    print("Shutdown received")
-                    await command_stream.send_all(Status.Success.to_bytes())
-                    break
+                print(command.name, "received")
+                match command:
+                    case Command.Shutdown:
+                        await server_stream.send_all(Status.Success.to_bytes())
+                        break
+                    case Command.NewPeer:
+                        peer = _Worker.from_dict(payload)
+                        if peer.uid == self._uid:
+                            print("This is me")
+                        elif peer.uid in self._peers:
+                            print("Already have peer!")
+                        else:
+                            self._peers[peer.uid] = peer
+                    case Command.RemovePeer:
+                        uid = UUID(bytes=payload["uid"])
+                        try:
+                            del self._peers[uid]
+                        except KeyError:
+                            print("No such peer")
+                    case _:
+                        print("Unhandled command:", command.name, payload)
 
         cancel_scope.cancel()
         print("Command listener closing")
 
-    async def register(self, host, registration_port, registration_key):
-        tcp_stream = await utils.open_tcp_stream_retry(host, registration_port)
+    async def register(self, host, server_port, registration_key):
+        server_stream = await trio.open_tcp_stream(host, server_port)
 
-        async with tcp_stream:
-            await tcp_stream.send_all(json.dumps({
-                "key": registration_key,
-                "handle": self._handle.to_dict(),
-            }).encode())
+        await _send_message(server_stream, {
+            "key": registration_key,
+            "port": self._port,
+            "uid": self._uid.bytes
+        })
 
-            registration_response = cpkl.loads(await tcp_stream.receive_some())
+        registration_response = cpkl.loads(await server_stream.receive_some())
 
-            if registration_response["status"] == Status.Success:
-                self._handle.hostname = registration_response["worker_hostname"]
-                return registration_response["work_fn"]
+        if registration_response["status"] != Status.Success:
             # TODO: Retry until successful or the worker is shut down
             raise RuntimeError()
+        self._hostname = registration_response["hostname"]
+        return registration_response["work_fn"], server_stream
+
+
+async def _send_message(stream, msg):
+    msg = msgpack.packb(msg)
+    await stream.send_all(msg)

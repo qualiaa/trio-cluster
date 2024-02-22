@@ -39,11 +39,3 @@ async def aevery(time, func, *args, **kargs):
     while True:
         await func(*args, **kargs)
         await trio.sleep(time)
-
-
-async def open_tcp_stream_retry(*args, backoff=0.1, **kargs):
-    while True:
-        try:
-            return await trio.open_tcp_stream(*args, **kargs)
-        except OSError:
-            await trio.sleep(backoff)
