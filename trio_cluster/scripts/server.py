@@ -8,7 +8,10 @@ from ..cluster_manager import ClusterManager
 
 def run(args):
     server = ClusterManager(args.registration_key, args.port)
-    trio.run(server.listen)
+    try:
+        trio.run(server.listen)
+    except KeyboardInterrupt:
+        pass
 
 
 def main():

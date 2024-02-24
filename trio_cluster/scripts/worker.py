@@ -8,10 +8,13 @@ from ..cluster_worker import ClusterWorker
 
 def run(args):
     worker = ClusterWorker(args.port)
-    trio.run(worker.run,
-             args.server_hostname,
-             args.server_port,
-             args.registration_key)
+    try:
+        trio.run(worker.run,
+                args.server_hostname,
+                args.server_port,
+                args.registration_key)
+    except KeyboardInterrupt:
+        pass
 
 
 def main():
