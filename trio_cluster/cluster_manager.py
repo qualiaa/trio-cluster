@@ -6,7 +6,7 @@ import cloudpickle as cpkl
 import trio
 
 from . import utils
-from .constants import Command, Status
+from .message import Message, Status
 from .cluster_worker import _Client
 
 
@@ -59,20 +59,20 @@ class ClusterManager:
     async def _manage_client(self, client, client_stream):
         self._clients[client.uid] = client, client_stream
         try:
-            await self._receive_client_commands(client, client_stream)
+            await self._receive_client_messages(client, client_stream)
         finally:
             del self._clients[client.uid]
             with trio.move_on_after(1) as cleanup_scope:
                 cleanup_scope.shield = True
-                await _send_command(client_stream, Command.Shutdown)
+                await Message.Shutdown.send(client_stream)
 
-    async def _receive_client_commands(self, client, client_stream):
-        print("Connected to command stream")
+    async def _receive_client_messages(self, client, client_stream):
+        print("Connected to message stream")
         async for msg in client_stream:
             print(msgpack.unpackb(msg))
 
     async def _register_client(self, client_stream):
-        registration_msg = await _receive_message(client_stream)
+        registration_msg = await Message.ConnectPing.expect(client_stream)
 
         if registration_msg["key"] != self._registration_key:
             await client_stream.send_all(cpkl.dumps({"status": Status.BadKey}))
@@ -91,20 +91,9 @@ class ClusterManager:
             return client
 
 
-async def _send_command(stream, command, **kargs):
-    message = {"command": command.to_b64().decode("ascii")}
-    if kargs:
-        message["payload"] = kargs
-    await stream.send_all(msgpack.packb(message))
-
-
-async def _receive_message(stream):
-    return msgpack.unpackb(await stream.receive_some())
-
-
 async def _send_peer(peer_stream, client):
-    await _send_command(peer_stream, Command.NewPeer, **client.to_dict())
+    await Message.NewPeer.send(peer_stream, **client.to_dict())
 
 
 async def _remove_peer(peer_stream, client):
-    await _send_command(peer_stream, Command.RemovePeer, uid=client.uid.bytes)
+    await Message.RemovePeer.send(peer_stream, uid=client.uid.bytes)
