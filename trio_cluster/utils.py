@@ -34,6 +34,20 @@ def get_hostname(stream):
     return stream.socket.getpeername()[0]
 
 
+def noexcept(name: str, *to_throw):
+    def decorator(f):
+        @wraps(f)
+        async def wrapped(*args, **kargs):
+            try:
+                return await f(*args, **kargs)
+            except to_throw:
+                raise
+            except Exception as e:
+                print(name, "failed:", type(e), *e.args)
+        return wrapped
+    return decorator
+
+
 def as_coroutine(f):
     """Awaitable wrapper for f."""
     if iscoroutinefunction(f):

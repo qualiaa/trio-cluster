@@ -39,24 +39,22 @@ class ClusterManager:
             await trio.serve_listeners(self._client_task, listeners)
         print("Server done")
 
+    @utils.noexcept("Client connection")
     async def _client_task(self, client_stream):
         async with client_stream:
-            try:
-                client = await self._register_client(client_stream)
+            client = await self._register_client(client_stream)
 
-                async with trio.open_nursery() as nursery:
-                    # FIXME: Possible contention on these streams
-                    for peer, peer_stream in self._clients.values():
-                        nursery.start_soon(_send_peer, peer_stream, client)
+            async with trio.open_nursery() as nursery:
+                # FIXME: Possible contention on these streams
+                for peer, peer_stream in self._clients.values():
+                    nursery.start_soon(_send_peer, peer_stream, client)
 
-                await self._manage_client(client, client_stream)
+            await self._manage_client(client, client_stream)
 
-                async with trio.open_nursery() as nursery:
-                    # FIXME: Possible contention on these streams
-                    for peer, peer_stream in self._clients.values():
-                        nursery.start_soon(_remove_peer, peer_stream, client)
-            except Exception as e:
-                print("Client exception", type(e), e)
+            async with trio.open_nursery() as nursery:
+                # FIXME: Possible contention on these streams
+                for peer, peer_stream in self._clients.values():
+                    nursery.start_soon(_remove_peer, peer_stream, client)
 
     async def _manage_client(self, client, client_stream):
         self._clients[client.uid] = client, client_stream
