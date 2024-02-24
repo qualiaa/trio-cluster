@@ -8,7 +8,7 @@ import trio
 
 from . import utils
 from .constants import Command, Status
-from .cluster_worker import _Worker
+from .cluster_worker import _Client
 
 
 class A():
@@ -23,77 +23,75 @@ class ClusterManager:
         self._port = port
 
         self._half_initialised = set()
-        self._workers = dict()
+        self._clients = dict()
         self._finished = trio.Event()
 
     async def listen(self):
         async with trio.open_nursery() as nursery:
             def print_status():
                 print("I'm alive!")
-                for i, (worker, _) in enumerate(self._workers.values()):
-                    print(f"\t[{i}] {worker}")
+                for i, (client, _) in enumerate(self._clients.values()):
+                    print(f"\t{i}: {client}")
                 print()
             nursery.start_soon(utils.every, 2, print_status)
             listeners = await trio.open_tcp_listeners(self._port)
             for listener in listeners:
                 _keepalive(listener.socket)
-            await trio.serve_listeners(self._worker_task, listeners)
+            await trio.serve_listeners(self._client_task, listeners)
         print("Server done")
 
-    async def _worker_task(self, worker_stream):
-        async with worker_stream:
+    async def _client_task(self, client_stream):
+        async with client_stream:
             try:
-                worker = await self._register_worker(worker_stream)
+                client = await self._register_client(client_stream)
 
                 async with trio.open_nursery() as nursery:
                     # FIXME: Possible contention on these streams
-                    for peer, peer_stream in self._workers.values():
-                        nursery.start_soon(_send_peer, peer_stream, worker)
-                        # TODO: Remove this part when listening impl is done
-                        nursery.start_soon(_send_peer, worker_stream, peer)
+                    for peer, peer_stream in self._clients.values():
+                        nursery.start_soon(_send_peer, peer_stream, client)
 
-                await self._manage_worker(worker, worker_stream)
+                await self._manage_client(client, client_stream)
 
                 async with trio.open_nursery() as nursery:
                     # FIXME: Possible contention on these streams
-                    for peer, peer_stream in self._workers.values():
-                        nursery.start_soon(_remove_peer, peer_stream, worker)
+                    for peer, peer_stream in self._clients.values():
+                        nursery.start_soon(_remove_peer, peer_stream, client)
             except Exception as e:
-                print("Worker exception", type(e), e)
+                print("Client exception", type(e), e)
 
-    async def _manage_worker(self, worker, worker_stream):
-        self._workers[worker.uid] = worker, worker_stream
+    async def _manage_client(self, client, client_stream):
+        self._clients[client.uid] = client, client_stream
         try:
-            await self._receive_worker_commands(worker, worker_stream)
+            await self._receive_client_commands(client, client_stream)
         finally:
-            del self._workers[worker.uid]
+            del self._clients[client.uid]
             with trio.move_on_after(1) as cleanup_scope:
                 cleanup_scope.shield = True
-                await _send_command(worker_stream, Command.Shutdown)
+                await _send_command(client_stream, Command.Shutdown)
 
-    async def _receive_worker_commands(self, worker, worker_stream):
+    async def _receive_client_commands(self, client, client_stream):
         print("Connected to command stream")
-        async for msg in worker_stream:
+        async for msg in client_stream:
             print(msgpack.unpackb(msg))
 
-    async def _register_worker(self, worker_stream):
-        registration_msg = await _receive_message(worker_stream)
+    async def _register_client(self, client_stream):
+        registration_msg = await _receive_message(client_stream)
 
         if registration_msg["key"] != self._registration_key:
-            await worker_stream.send_all(cpkl.dumps({"status": Status.BadKey}))
+            await client_stream.send_all(cpkl.dumps({"status": Status.BadKey}))
 
         else:
-            worker = _Worker(
-                hostname=worker_stream.socket.getpeername()[0],
+            client = _Client(
+                hostname=utils.get_hostname(client_stream),
                 uid=UUID(bytes=registration_msg["uid"]),
                 port=registration_msg["port"])
 
-            await worker_stream.send_all(cpkl.dumps({
+            await client_stream.send_all(cpkl.dumps({
                 "status": Status.Success,
                 "work_fn": A(),
-                "hostname": worker.hostname
+                "hostname": client.hostname
             }))
-            return worker
+            return client
 
 
 async def _send_command(stream, command, **kargs):
@@ -107,12 +105,12 @@ async def _receive_message(stream):
     return msgpack.unpackb(await stream.receive_some())
 
 
-async def _send_peer(stream, worker):
-    await _send_command(stream, Command.NewPeer, **worker.to_dict())
+async def _send_peer(peer_stream, client):
+    await _send_command(peer_stream, Command.NewPeer, **client.to_dict())
 
 
-async def _remove_peer(stream, worker):
-    await _send_command(stream, Command.RemovePeer, uid=worker.uid.bytes)
+async def _remove_peer(peer_stream, client):
+    await _send_command(peer_stream, Command.RemovePeer, uid=client.uid.bytes)
 
 
 def _keepalive(sock):

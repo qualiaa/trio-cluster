@@ -12,13 +12,19 @@ from .constants import Command, Status
 
 
 @dataclass
-class _Worker:
+class _Client:
     uid: UUID
     hostname: str
     port: int
 
     def __hash__(self):
         return hash(self.uid)
+
+    def __repr__(self):
+        return f"{type(self).__name__}({self.uid!r}, {self.hostname}, {self.port})"
+
+    def __str__(self):
+        return f"[{self.hostname}]:{self.port} ({self.uid.hex[:6]})"
 
     @classmethod
     def from_dict(cls, d):
