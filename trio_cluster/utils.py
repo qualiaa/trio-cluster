@@ -20,19 +20,6 @@ async def race(async_fn, *async_fns):
     return winner
 
 
-async def tcp_accept_one(handler, port, *, host=None, backlog=None):
-    print("Listening for things")
-    listeners = await trio.open_tcp_listeners(port, host=host, backlog=backlog)
-    print("Starting race")
-    tcp_stream = await race(*[l.accept for l in listeners])
-    print("Got one")
-    for l in listeners:
-        await l.aclose()
-
-    print("Starting handler")
-    await handler(tcp_stream)
-
-
 async def every(time, func, *args, **kargs):
     await aevery(time, as_coroutine(func), *args, **kargs)
 
