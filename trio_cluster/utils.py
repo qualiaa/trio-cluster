@@ -1,4 +1,6 @@
 import trio
+from functools import wraps
+from inspect import iscoroutinefunction
 
 
 async def race(async_fn, *async_fns):
@@ -30,9 +32,7 @@ async def tcp_accept_one(handler, port, *, host=None, backlog=None):
 
 
 async def every(time, func, *args, **kargs):
-    while True:
-        func(*args, **kargs)
-        await trio.sleep(time)
+    await aevery(time, as_coroutine(func), *args, **kargs)
 
 
 async def aevery(time, func, *args, **kargs):
@@ -43,3 +43,16 @@ async def aevery(time, func, *args, **kargs):
 
 def get_hostname(stream):
     return stream.socket.getpeername()[0]
+
+
+def as_coroutine(f):
+    """Awaitable wrapper for f."""
+    if iscoroutinefunction(f):
+        return f
+    if not callable(f):
+        raise TypeError(f"Expected coroutine or callable, got {type(f)}.")
+
+    @wraps(f)
+    async def call(*args, **kargs):
+        return f(*args, **kargs)
+    return call
