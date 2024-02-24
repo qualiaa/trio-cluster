@@ -1,6 +1,8 @@
-import trio
+import socket
 from functools import wraps
 from inspect import iscoroutinefunction
+
+import trio
 
 
 async def race(async_fn, *async_fns):
@@ -56,3 +58,23 @@ def as_coroutine(f):
     async def call(*args, **kargs):
         return f(*args, **kargs)
     return call
+
+
+def set_keepalive(sock):
+    # FIXME: One of these settings becomes irrelevant when USER_TIMEOUT
+    #        provided... remember which one
+    # Enable TCP keepalive
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+    # Keepalive attempts (-1 for the initial keepalive)
+    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 2)
+
+    # Connection idle time before sending first keepalive probe
+    # TODO: Increase keepalive times
+    # TODO: Stagger keepalive times
+    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 1)
+    # Delay between subsequent keepalive probes. Should be relatively prime to
+    # TCP_KEEPIDLE
+    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 1)
+    # User timeout - this ensures that interrupted sends do not override
+    #                keepalive
+    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_USER_TIMEOUT, 1)

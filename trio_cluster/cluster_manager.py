@@ -1,4 +1,3 @@
-import socket
 import time
 from uuid import UUID
 
@@ -36,7 +35,7 @@ class ClusterManager:
             nursery.start_soon(utils.every, 2, print_status)
             listeners = await trio.open_tcp_listeners(self._port)
             for listener in listeners:
-                _keepalive(listener.socket)
+                utils.set_keepalive(listener.socket)
             await trio.serve_listeners(self._client_task, listeners)
         print("Server done")
 
@@ -111,20 +110,3 @@ async def _send_peer(peer_stream, client):
 
 async def _remove_peer(peer_stream, client):
     await _send_command(peer_stream, Command.RemovePeer, uid=client.uid.bytes)
-
-
-def _keepalive(sock):
-    # Enable TCP keepalive
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-    # Keepalive attempts (-1 for the initial keepalive)
-    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 2)
-    # Connection idle time before sending first keepalive probe
-    # TODO: Increase keepalive times
-    # TODO: Stagger keepalive times
-    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 1)
-    # Delay between subsequent keepalive probes. Should be relatively prime to
-    # TCP_KEEPIDLE
-    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 1)
-    # User timeout - this ensures that interrupted sends do not override
-    #                keepalive
-    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_USER_TIMEOUT, 1)
