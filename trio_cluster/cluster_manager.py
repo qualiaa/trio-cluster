@@ -1,5 +1,6 @@
 import time
 from uuid import UUID
+from typing import NoReturn
 
 import msgpack
 import cloudpickle as cpkl
@@ -17,7 +18,7 @@ class A():
 
 
 class ClusterManager:
-    def __init__(self, registration_key, port):
+    def __init__(self, registration_key: str, port: int):
         self._registration_key = registration_key
         self._port = port
 
@@ -25,7 +26,7 @@ class ClusterManager:
         self._clients = dict()
         self._finished = trio.Event()
 
-    async def listen(self):
+    async def listen(self) -> None:
         async with trio.open_nursery() as nursery:
             def print_status():
                 print("I'm alive!")
@@ -40,7 +41,7 @@ class ClusterManager:
         print("Server done")
 
     @utils.noexcept("Client connection")
-    async def _client_task(self, client_stream):
+    async def _client_task(self, client_stream: trio.SocketStream) -> None:
         async with client_stream:
             client = await self._register_client(client_stream)
 
@@ -56,7 +57,8 @@ class ClusterManager:
                 for peer, peer_stream in self._clients.values():
                     nursery.start_soon(_remove_peer, peer_stream, client)
 
-    async def _manage_client(self, client, client_stream):
+    async def _manage_client(
+            self, client: _Client, client_stream: trio.SocketStream) -> None:
         self._clients[client.uid] = client, client_stream
         try:
             await self._receive_client_messages(client, client_stream)
@@ -66,16 +68,19 @@ class ClusterManager:
                 cleanup_scope.shield = True
                 await Message.Shutdown.send(client_stream)
 
-    async def _receive_client_messages(self, client, client_stream):
+    async def _receive_client_messages(
+            self, client: _Client, client_stream: trio.SocketStream) -> None:
         print("Connected to message stream")
         async for msg in client_stream:
             print(msgpack.unpackb(msg))
 
-    async def _register_client(self, client_stream):
+    async def _register_client(
+            self, client_stream: trio.SocketStream) -> _Client:
         registration_msg = await Message.ConnectPing.expect(client_stream)
 
         if registration_msg["key"] != self._registration_key:
             await client_stream.send_all(cpkl.dumps({"status": Status.BadKey}))
+            raise ValueError("Incorrect registration key")
 
         else:
             client = _Client(
@@ -91,9 +96,9 @@ class ClusterManager:
             return client
 
 
-async def _send_peer(peer_stream, client):
+async def _send_peer(peer_stream: trio.SocketStream, client: _Client) -> None:
     await Message.NewPeer.send(peer_stream, **client.to_dict())
 
 
-async def _remove_peer(peer_stream, client):
+async def _remove_peer(peer_stream: trio.SocketStream, client: _Client) -> None:
     await Message.RemovePeer.send(peer_stream, uid=client.uid.bytes)

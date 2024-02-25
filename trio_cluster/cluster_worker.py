@@ -1,7 +1,7 @@
 import dataclasses
 from dataclasses import dataclass
 from functools import partial
-from typing import Optional
+from typing import Any, Callable, NoReturn, Optional, TypeAlias
 from uuid import UUID, uuid4
 
 import cloudpickle as cpkl
@@ -21,6 +21,9 @@ class InternalError(Exception):
     """Something unexpected has happened."""
 
 
+WorkFunction: TypeAlias = Callable[[], Any]
+
+
 @dataclass
 class _Client:
     uid: UUID
@@ -37,7 +40,7 @@ class _Client:
         return f"[{self.hostname}]:{self.port} ({self.uid.hex[:6]})"
 
     @classmethod
-    def from_dict(cls, d):
+    def from_dict(cls, d: dict[str, Any]):
         return cls(**d | {"uid": UUID(bytes=d["uid"])})
 
     def to_dict(self):
@@ -59,7 +62,7 @@ class _PeerConnection:
 
 
 class ClusterWorker:
-    def __init__(self, port):
+    def __init__(self, port: int):
         self._uid = uuid4()
         self._hostname = "localhost"
         self._port = port
@@ -77,7 +80,12 @@ class ClusterWorker:
                 partial(self._run, *args, **kargs, cancel_scope=nursery.cancel_scope))
         print("Client done")
 
-    async def _run(self, server_hostname, server_port, registration_key, cancel_scope):
+    async def _run(
+            self,
+            server_hostname: str,
+            server_port: int,
+            registration_key: str,
+            cancel_scope: trio.CancelScope):
         work_fn, server_stream = await self.register(
             server_hostname, server_port, registration_key)
 
@@ -89,13 +97,13 @@ class ClusterWorker:
             await self._receive_server_messages(
                 server_stream, nursery, cancel_scope=cancel_scope)
 
-    async def do_work(self, fn):
+    async def do_work(self, fn: WorkFunction) -> NoReturn:
         while True:
             print("Starting work")
             await trio_parallel.run_sync(fn, cancellable=True)
             print("Finished work")
 
-    async def _ping_peers(self):
+    async def _ping_peers(self) -> None:
         for conn in self._peers.values():
             try:
                 try:
@@ -113,7 +121,11 @@ class ClusterWorker:
             except Exception as e:
                 print("Error messaging peer:", type(e), *e.args)
 
-    async def _receive_server_messages(self, server_stream, nursery, cancel_scope):
+    async def _receive_server_messages(
+            self,
+            server_stream: trio.SocketStream,
+            nursery: trio.Nursery,
+            cancel_scope: trio.CancelScope) -> None:
         print("Waiting for messages")
         while True:
             try:
@@ -138,7 +150,8 @@ class ClusterWorker:
                           "Payload:", payload)
 
     @utils.noexcept("Inbound connection")
-    async def _handle_inbound_connection(self, recv_stream):
+    async def _handle_inbound_connection(
+            self, recv_stream: trio.SocketStream) -> None:
         print("Received connection")
         try:
             message, payload = await Message.recv(recv_stream)
@@ -192,9 +205,8 @@ class ClusterWorker:
             await self._remove_peer(peer.uid)
             raise
 
-
     @utils.noexcept("Initiating peer connection")
-    async def _peer_connect_ping(self, peer):
+    async def _peer_connect_ping(self, peer: _Client) -> None:
         """If A -> B and then B -> A, this function is A -> B"""
         print("Starting ping connection")
         if peer.uid == self._uid:
@@ -205,17 +217,18 @@ class ClusterWorker:
         conn = self._incomplete_connections[peer.uid] = _PeerConnection(peer=peer, lock=trio.Lock())
         await self._open_send_stream(conn, Message.ConnectPing)
 
-    async def _peer_connect_pong(self, conn):
+    async def _peer_connect_pong(self, conn: _PeerConnection) -> None:
         """If A -> B and then B -> A, this function is B -> A"""
         print("Starting pong connection")
         await self._open_send_stream(conn, Message.ConnectPong)
         self._complete_connection(conn.peer.uid)
 
-    def _complete_connection(self, uid):
+    def _complete_connection(self, uid: UUID) -> None:
         print("Peer connection complete", uid)
         self._peers[uid] = self._incomplete_connections.pop(uid)
 
-    async def _open_send_stream(self, conn, message):
+    async def _open_send_stream(
+            self, conn: _PeerConnection, message: Message) -> None:
         async with conn.lock:
             print("Me -> Them")
             send_stream = await trio.open_tcp_stream(
@@ -233,7 +246,7 @@ class ClusterWorker:
             await self._remove_peer(conn.peer.uid)
             raise
 
-    async def _remove_peer(self, uid: UUID):
+    async def _remove_peer(self, uid: UUID) -> None:
         if not isinstance(uid, UUID):
             raise TypeError("Peer must be passed as UUID")
         print("Removing peer", uid)
@@ -252,7 +265,11 @@ class ClusterWorker:
                 await conn.recv.aclose()
         print("Removed peer:", conn.peer)
 
-    async def register(self, server_hostname, server_port, registration_key):
+    async def register(self,
+                       server_hostname: str,
+                       server_port: int,
+                       registration_key: str
+                       ) -> tuple[WorkFunction, trio.SocketStream]:
         server_stream = await trio.open_tcp_stream(server_hostname, server_port)
 
         await Message.ConnectPing.send(
@@ -266,6 +283,6 @@ class ClusterWorker:
 
         if registration_response["status"] != Status.Success:
             # TODO: Retry until successful or the worker is shut down
-            raise RuntimeError()
+            raise RuntimeError("Server signalled registration failure")
         self._hostname = registration_response["hostname"]
         return registration_response["work_fn"], server_stream

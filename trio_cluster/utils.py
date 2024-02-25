@@ -1,6 +1,7 @@
 import socket
 from functools import wraps
 from inspect import iscoroutinefunction
+from typing import NoReturn
 
 import trio
 
@@ -20,17 +21,17 @@ async def race(async_fn, *async_fns):
     return winner
 
 
-async def every(time, func, *args, **kargs):
-    await aevery(time, as_coroutine(func), *args, **kargs)
+async def every(seconds: float, func, *args, **kargs) -> NoReturn:
+    await aevery(seconds, as_coroutine(func), *args, **kargs)
 
 
-async def aevery(time, func, *args, **kargs):
+async def aevery(seconds: float, func, *args, **kargs) -> NoReturn:
     while True:
         await func(*args, **kargs)
-        await trio.sleep(time)
+        await trio.sleep(seconds)
 
 
-def get_hostname(stream):
+def get_hostname(stream) -> str:
     return stream.socket.getpeername()[0]
 
 
@@ -61,7 +62,7 @@ def as_coroutine(f):
     return call
 
 
-def set_keepalive(sock):
+def set_keepalive(sock: socket.socket) -> None:
     # FIXME: One of these settings becomes irrelevant when USER_TIMEOUT
     #        provided... remember which one
     # Enable TCP keepalive
