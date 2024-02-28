@@ -1,10 +1,10 @@
 import math
-import msgpack
 from typing import Any, Self
 from base64 import b64encode, b64decode
 from enum import IntEnum
 from itertools import count
 
+import msgpack
 import trio
 
 
@@ -43,29 +43,31 @@ class Message(MessageBase):
     RemovePeer = next(_unique)
     ConnectPing = next(_unique)
     ConnectPong = next(_unique)
+    PeerMessage = next(_unique)
 
     async def send(self, stream: trio.SocketStream, **kargs) -> None:
-        message = {"command": bytes(self)}
+        message = {"messagetype": bytes(self)}
         if kargs:
             message["payload"] = kargs
         await stream.send_all(msgpack.packb(message))
+
 
     @classmethod
     async def recv(cls, stream: trio.SocketStream) -> tuple[Self, Any]:
         msg = await stream.receive_some()
         msg = msgpack.unpackb(msg)
         try:
-            command = cls.from_bytes(msg["command"])
+            messagetype = cls.from_bytes(msg["messagetype"])
         except KeyError:
-            raise ValueError("No command in message") from None
+            raise ValueError("No messagetype in message") from None
         except (ValueError, TypeError):
-            raise ValueError("Invalid command in message:", msg["command"]) from None
-        return command, msg.get("payload")
+            raise ValueError("Invalid messagetype in message:", msg["messagetype"]) from None
+        return messagetype, msg.get("payload")
 
     async def expect(self, stream: trio.SocketStream) -> Any:
-        command, payload = await self.recv(stream)
-        if command != self:
-            raise ValueError(f"Received {command.name}, expected {self.name}")
+        messagetype, payload = await self.recv(stream)
+        if messagetype != self:
+            raise ValueError(f"Received {messagetype.name}, expected {self.name}")
         return payload
 
 

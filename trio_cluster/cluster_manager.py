@@ -1,6 +1,5 @@
 import time
 from uuid import UUID
-from typing import NoReturn
 
 import msgpack
 import cloudpickle as cpkl
