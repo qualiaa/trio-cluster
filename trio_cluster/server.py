@@ -7,7 +7,7 @@ import trio
 
 from . import utils
 from .message import Message, Status
-from .cluster_worker import _Client
+from .client import ClientHandle
 
 
 class A():
@@ -16,7 +16,7 @@ class A():
         return 5
 
 
-class ClusterManager:
+class Server:
     def __init__(self, registration_key: str, port: int):
         self._registration_key = registration_key
         self._port = port
@@ -57,7 +57,7 @@ class ClusterManager:
                     nursery.start_soon(_remove_peer, peer_stream, client)
 
     async def _manage_client(
-            self, client: _Client, client_stream: trio.SocketStream) -> None:
+            self, client: ClientHandle, client_stream: trio.SocketStream) -> None:
         self._clients[client.uid] = client, client_stream
         try:
             await self._receive_client_messages(client, client_stream)
@@ -68,13 +68,13 @@ class ClusterManager:
                 await Message.Shutdown.send(client_stream)
 
     async def _receive_client_messages(
-            self, client: _Client, client_stream: trio.SocketStream) -> None:
+            self, client: ClientHandle, client_stream: trio.SocketStream) -> None:
         print("Connected to message stream")
         async for msg in client_stream:
             print(msgpack.unpackb(msg))
 
     async def _register_client(
-            self, client_stream: trio.SocketStream) -> _Client:
+            self, client_stream: trio.SocketStream) -> ClientHandle:
         registration_msg = await Message.ConnectPing.expect(client_stream)
 
         if registration_msg["key"] != self._registration_key:
@@ -82,7 +82,7 @@ class ClusterManager:
             raise ValueError("Incorrect registration key")
 
         else:
-            client = _Client(
+            client = ClientHandle(
                 hostname=utils.get_hostname(client_stream),
                 uid=UUID(bytes=registration_msg["uid"]),
                 port=registration_msg["port"])
@@ -95,9 +95,9 @@ class ClusterManager:
             return client
 
 
-async def _send_peer(peer_stream: trio.SocketStream, client: _Client) -> None:
+async def _send_peer(peer_stream: trio.SocketStream, client: ClientHandle) -> None:
     await Message.NewPeer.send(peer_stream, **client.to_dict())
 
 
-async def _remove_peer(peer_stream: trio.SocketStream, client: _Client) -> None:
+async def _remove_peer(peer_stream: trio.SocketStream, client: ClientHandle) -> None:
     await Message.RemovePeer.send(peer_stream, uid=client.uid.bytes)

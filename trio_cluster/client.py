@@ -26,7 +26,7 @@ class InternalError(Exception):
 
 
 @dataclass(slots=True, frozen=True)
-class _Client:
+class ClientHandle:
     uid: UUID
     hostname: str
     port: int
@@ -50,7 +50,7 @@ class _Client:
 
 @dataclass(frozen=True, slots=True)
 class Peer:
-    handle: _Client
+    handle: ClientHandle
     _send: trio.SocketStream
 
     async def send(self, tag: str, data: Any, pickle=False) -> bool:
@@ -77,7 +77,7 @@ class Worker(ABC):
     ):
         ...
 
-    async def handle_peer_message(self, peer_handle: _Client, tag: str, data: Any):
+    async def handle_peer_message(self, peer_handle: ClientHandle, tag: str, data: Any):
         ...
 
     async def handle_server_message(self, tag: str, data: Any):
@@ -86,7 +86,7 @@ class Worker(ABC):
 
 @dataclass(slots=True)
 class _PeerConnection:
-    peer: _Client
+    peer: ClientHandle
     lock: trio.Lock
     send: Optional[trio.abc.Stream] = None
     recv: Optional[trio.abc.Stream] = None
@@ -101,7 +101,7 @@ class _PeerConnection:
         return Peer(handle=self.peer, _send=self.send)
 
 
-class ClusterWorker:
+class Client:
     def __init__(self, port: int, worker):
         self._uid = uuid4()
         self._hostname = "localhost"
@@ -187,7 +187,7 @@ class ClusterWorker:
                     return
                 case Message.NewPeer:
                     nursery.start_soon(self._peer_connect_ping,
-                                       _Client.from_dict(payload))
+                                       ClientHandle.from_dict(payload))
                 case Message.RemovePeer:
                     await self._remove_peer(UUID(bytes=payload["uid"]))
                 case Message.PeerMessage:
@@ -206,7 +206,7 @@ class ClusterWorker:
         print("Received connection")
         try:
             message, payload = await Message.recv(recv_stream)
-            peer = _Client.from_dict(
+            peer = ClientHandle.from_dict(
                 {"hostname": utils.get_hostname(recv_stream)} | payload)
             if peer.uid == self._uid:
                 raise ValueError("UID collision")
@@ -283,7 +283,7 @@ class ClusterWorker:
             await self._remove_peer(peer.uid)
 
     @utils.noexcept("Initiating peer connection")
-    async def _peer_connect_ping(self, peer: _Client) -> None:
+    async def _peer_connect_ping(self, peer: ClientHandle) -> None:
         """If A -> B and then B -> A, this function is A -> B"""
         print("Starting ping connection")
         if peer.uid == self._uid:
@@ -363,7 +363,7 @@ class ClusterWorker:
             if registration_response["status"] == Status.BadKey:
                 raise RuntimeError("Incorrect registration key")
             if registration_response["status"] != Status.Success:
-                # TODO: Retry until successful or the worker is shut down
+                # TODO: Retry until successful or the client is shut down
                 raise RuntimeError("Server signalled registration failure")
             self._hostname = registration_response["hostname"]
         except BaseException:

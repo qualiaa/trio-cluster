@@ -5,7 +5,7 @@ import trio
 import trio_parallel
 
 from .. import utils, constants as C
-from ..cluster_worker import ClusterWorker, Worker as WorkerBase
+from ..client import Client, Worker as WorkerBase
 
 
 class Worker(WorkerBase):
@@ -37,7 +37,7 @@ class Worker(WorkerBase):
 
 
 def run(args):
-    worker = ClusterWorker(args.port, Worker())
+    worker = Client(args.port, Worker())
     try:
         trio.run(worker.run,
                  args.server_hostname,
@@ -50,7 +50,7 @@ def run(args):
 def main():
     parser = ArgumentParser()
     parser.add_argument("registration_key")
-    parser.add_argument("-p", "--port", type=int, default=C.DEFAULT_PEER_PORT)
+    parser.add_argument("-p", "--port", type=int, default=C.DEFAULT_CLIENT_PORT)
     parser.add_argument("-H", "--server-hostname", default="localhost")
     parser.add_argument("-P", "--server-port", type=int, default=C.DEFAULT_SERVER_PORT)
     run(parser.parse_args())

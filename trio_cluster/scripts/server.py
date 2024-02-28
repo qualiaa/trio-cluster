@@ -3,11 +3,11 @@ from argparse import ArgumentParser
 import trio
 
 from .. import constants as C
-from ..cluster_manager import ClusterManager
+from ..server import Server
 
 
 def run(args):
-    server = ClusterManager(args.registration_key, args.port)
+    server = Server(args.registration_key, args.port)
     try:
         trio.run(server.listen)
     except KeyboardInterrupt:
