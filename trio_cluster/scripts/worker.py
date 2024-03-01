@@ -1,6 +1,7 @@
 from argparse import ArgumentParser
 from typing import Any
 
+import cloudpickle as cpkl
 import trio
 import trio_parallel
 
@@ -9,23 +10,33 @@ from ..client import Client, Worker as WorkerBase
 
 
 class Worker(WorkerBase):
-    async def run(self, work_detail, peers, server_send):
-        async with trio.open_nursery() as nursery:
-            nursery.start_soon(utils.aevery, 1, self._ping_peers, peers)
-            nursery.start_soon(self._do_work, work_detail)
+    def __init__(self):
+        self._work_fn = None
 
-    async def _ping_peers(self, peers):
+    async def run(self, peers, server_send):
+        print("Running worker!")
+        async with trio.open_nursery() as nursery:
+            nursery.start_soon(utils.aevery, 1, self._ping_peers, peers, server_send)
+            nursery.start_soon(self._do_work, server_send)
+
+    async def _ping_peers(self, peers, server_send):
         for peer in peers():
             try:
                 await peer.send("ping", "Hello")
             except Exception as e:
                 print("Error messaging peer:", type(e), *e.args)
+        await server_send("ping", "Hello")
 
-    async def _do_work(self, work_fn):
+    async def _do_work(self, server_send):
         while True:
-            print("Doing work")
-            await trio_parallel.run_sync(work_fn, cancellable=True)
-            print("Done!")
+            if self._work_fn is not None:
+                print("Doing work")
+                result = await trio_parallel.run_sync(self._work_fn, cancellable=True)
+                await server_send("result", result)
+            else:
+                await trio.sleep(2)
+            if self._work_fn is not None:
+                print("Done!")
 
     async def handle_peer_message(self, peer_handle, tag: str, data: Any):
         match tag:
@@ -33,7 +44,9 @@ class Worker(WorkerBase):
             case tag: print(f"[{peer_handle}] unknown tag {tag}")
 
     async def handle_server_message(self, tag: str, data: Any):
-        pass
+        match tag:
+            case "work_fn": self._work_fn = cpkl.loads(data)
+            case tag: print(f"[server] unknown tag {tag}")
 
 
 def run(args):

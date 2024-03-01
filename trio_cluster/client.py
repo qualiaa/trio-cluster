@@ -6,7 +6,6 @@ from typing import Any, Callable, Optional
 from uuid import UUID, uuid4
 
 import cloudpickle as cpkl
-import msgpack
 import trio
 
 from . import utils
@@ -58,7 +57,7 @@ class Peer:
         # peer list
         if pickle:
             data = cpkl.dumps(data)
-        await Message.PeerMessage.send(self._send, tag=tag, data=data)
+        await Message.ClientMessage.send(self._send, tag=tag, data=data)
         try:
             await Status.Success.expect(self._send)
         except Exception:
@@ -71,7 +70,6 @@ class Worker(ABC):
     @abstractmethod
     async def run(
             self,
-            work_detail,
             peers: Callable[[], list[Peer]],
             server_send: Callable[[bytes | object], Awaitable[None]]
     ):
@@ -102,14 +100,15 @@ class _PeerConnection:
 
 
 class Client:
-    def __init__(self, port: int, worker):
+    def __init__(self, port: int, worker: Worker):
         self._uid = uuid4()
         self._hostname = "localhost"
         self._port = port
 
         self._worker = worker
 
-        self._server_stream = None
+        self._server_lock = trio.Lock()
+        self._server_stream: Optional[trio.SocketStream] = None
 
         self._incomplete_connections = {}
         self._peers = {}
@@ -124,32 +123,34 @@ class Client:
             print("Listening")
 
             try:
-                work_detail, server_stream = await self._register(
+                await self._connect_to_server(
                     server_hostname, server_port, registration_key)
             except Exception as e:
                 print("Failed to connect to server:", type(e), *e.args)
                 nursery.cancel_scope.cancel()
-                return
+                raise
             print("Connected to server")
 
-            async with server_stream:
-                await self._run(server_stream, work_detail, nursery.cancel_scope)
+            async with self._server_stream:
+                await self._run(nursery.cancel_scope)
         # TODO: Clean up internal state
         print("Client done")
 
     async def _run(
             self,
-            server_stream: trio.SocketStream,
-            work_detail: Any,
             cancel_scope: trio.CancelScope) -> None:
         async with trio.open_nursery() as nursery:
-            nursery.start_soon(self._worker.run,
-                               work_detail,
-                               self._get_peers,
-                               self._send_to_server)
+            nursery.start_soon(self._run_worker)
             # NOTE: Must start polling server after starting worker
             nursery.start_soon(self._receive_server_messages,
-                               server_stream, nursery, cancel_scope)
+                               nursery, cancel_scope)
+
+    async def _run_worker(self):
+        try:
+            await self._worker.run(self._get_peers, self._send_to_server)
+        except Exception as e:
+            print("Worker run error", type(e), *e.args)
+            raise UserError from e
 
     def _get_peers(self):
         return [conn.as_peer() for conn in self._peers.values()]
@@ -158,7 +159,9 @@ class Client:
         if pickle:
             data = cpkl.dumps(data)
         try:
-            await Message.PeerMessage.send(self._server_stream, tag=tag, data=data)
+            async with self._server_lock:
+                await Message.ClientMessage.send(
+                    self._server_stream, tag=tag, data=data)
         except Exception as e:
             print("Error occurred while sending data", type(e), *e.args)
             return False
@@ -166,21 +169,24 @@ class Client:
 
     async def _receive_server_messages(
             self,
-            server_stream: trio.SocketStream,
             nursery: trio.Nursery,
             cancel_scope: trio.CancelScope) -> None:
         print("Waiting for messages")
         while True:
             try:
-                message, payload = await Message.recv(server_stream)
+                with trio.fail_after(0.01):
+                    async with self._server_lock:
+                        messagetype, payload = await Message.recv(self._server_stream)
+            except trio.TooSlowError:
+                continue
             except Exception as e:
                 print("Did not receive valid message:", type(e), *e.args)
                 continue
 
-            print(message.name, "received")
+            print(messagetype.name, "received")
             # TODO: Validate full payload by message type in one step before
             #       dispatch
-            match message:
+            match messagetype:
                 case Message.Shutdown:
                     cancel_scope.cancel()
                     print("Server connection closing")
@@ -190,14 +196,15 @@ class Client:
                                        ClientHandle.from_dict(payload))
                 case Message.RemovePeer:
                     await self._remove_peer(UUID(bytes=payload["uid"]))
-                case Message.PeerMessage:
+                case Message.ClientMessage:
                     tag, data = payload["tag"], payload["data"]
                     try:
-                        self._worker.handle_server_message(tag, data)
+                        await self._worker.handle_server_message(tag, data)
                     except Exception as e:
+                        print("Exception occurred in handle_server_message:", type(e), *e.args)
                         raise UserError from e
                 case _:
-                    print("Unhandled message:", message.name,
+                    print("Unhandled message:", messagetype.name,
                           "Payload:", payload)
 
     @utils.noexcept("Inbound connection")
@@ -251,11 +258,10 @@ class Client:
             async for msg in recv_stream:
                 try:
                     try:
-                        msg = msgpack.unpackb(msg)
-                        messagetype = Message.from_bytes(msg["messagetype"])
-                        assert messagetype == Message.PeerMessage, messagetype
-                        tag = msg["payload"]["tag"]
-                        data = msg["payload"]["data"]
+                        messagetype, payload = Message.from_bytes(msg)
+                        assert messagetype == Message.ClientMessage, messagetype
+                        tag = payload["tag"]
+                        data = payload["data"]
                     except Exception:
                         print("Unexpected message from peer")
                         raise
@@ -342,11 +348,11 @@ class Client:
                 await conn.recv.aclose()
         print("Removed peer:", conn.peer)
 
-    async def _register(self,
-                        server_hostname: str,
-                        server_port: int,
-                        registration_key: str
-                        ) -> tuple[Any, trio.SocketStream]:
+    async def _connect_to_server(self,
+                                 server_hostname: str,
+                                 server_port: int,
+                                 registration_key: str
+                                 ) -> None:
         server_stream = await trio.open_tcp_stream(server_hostname, server_port)
 
         try:
@@ -357,7 +363,6 @@ class Client:
                 uid=self._uid.bytes
             )
 
-            # TODO: Get rid of work function
             registration_response = cpkl.loads(await server_stream.receive_some())
 
             if registration_response["status"] == Status.BadKey:
@@ -369,4 +374,5 @@ class Client:
         except BaseException:
             await server_stream.aclose()
             raise
-        return registration_response["work_fn"], server_stream
+        print("Registered!")
+        self._server_stream = server_stream
