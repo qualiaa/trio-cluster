@@ -17,6 +17,7 @@ trio = "^0.24"
 trio-parallel = "^0.5"
 trio-util = "^0.6"
 cloudpickle = "^2"
+msgpack = "^1.0"
 
 [tool.poetry.scripts]
 trio-server = 'trio_cluster.scripts.server:main'
