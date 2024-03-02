@@ -15,7 +15,7 @@ class MessageBase(IntEnum):
     # TODO: Replace this with a string-backed enum
     @classmethod
     def byte_size(cls) -> int:
-        return math.floor(math.log2(max(cls))) + 1
+        return 1 + int(math.log2(max(cls))//8)
 
     def __bytes__(self) -> bytes:
         return self.to_bytes()
