@@ -1,50 +1,19 @@
-import dataclasses
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable
 from dataclasses import dataclass
-from typing import Any, Callable, Optional
+from typing import Any, Callable, NoReturn, Optional, Self
 from uuid import UUID, uuid4
 
 import cloudpickle as cpkl
 import trio
 
 from . import utils
+from ._client_handle import ClientHandle
+from ._duplex_connection import (
+    _DuplexConnection,
+    ConnectionManager)
+from ._exc import *
 from .message import Message, Status
-
-
-class UserError(Exception):
-    """Error occurred in user code."""
-
-
-class SequenceError(Exception):
-    """Something has happened out of sequence"""
-
-
-class InternalError(Exception):
-    """Something unexpected has happened."""
-
-
-@dataclass(slots=True, frozen=True)
-class ClientHandle:
-    uid: UUID
-    hostname: str
-    port: int
-
-    def __hash__(self):
-        return hash(self.uid)
-
-    def __repr__(self):
-        return f"{type(self).__name__}({self.uid!r}, {self.hostname}, {self.port})"
-
-    def __str__(self):
-        return f"[{self.hostname}]:{self.port} ({self.uid.hex[:6]})"
-
-    @classmethod
-    def from_dict(cls, d: dict[str, Any]):
-        return cls(**d | {"uid": UUID(bytes=d["uid"])})
-
-    def to_dict(self):
-        return dataclasses.asdict(self) | {"uid": self.uid.bytes}
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,6 +35,10 @@ class Peer:
         return True
 
 
+def _peer_from_duplex_connection(conn: _DuplexConnection):
+        return Peer(handle=conn.destination, _send=conn.send)
+
+
 class Worker(ABC):
     @abstractmethod
     async def run(
@@ -82,44 +55,28 @@ class Worker(ABC):
         ...
 
 
-@dataclass(slots=True)
-class _PeerConnection:
-    peer: ClientHandle
-    lock: trio.Lock
-    send: Optional[trio.abc.Stream] = None
-    recv: Optional[trio.abc.Stream] = None
-
-    def __str__(self):
-        return str(self.peer)
-
-    def __repr__(self):
-        return f"<{type(self).__name__}({self.peer!r}, send={self.send!r}, recv={self.recv!r})>"
-
-    def as_peer(self) -> Peer:
-        return Peer(handle=self.peer, _send=self.send)
-
-
 class Client:
     def __init__(self, port: int, worker: Worker):
-        self._uid = uuid4()
-        self._hostname = "localhost"
-        self._port = port
+        self._handle = ClientHandle(
+            uid=uuid4(),
+            hostname="localhost",
+            port=port)
 
         self._worker = worker
 
         self._server_lock = trio.Lock()
         self._server_stream: Optional[trio.SocketStream] = None
 
-        self._incomplete_connections = {}
-        self._peers = {}
+        self._peer_connections = ConnectionManager(self._handle)
 
     async def run(self,
                   server_hostname: str,
                   server_port: int,
                   registration_key: str) -> None:
+        print(f"Starting client {self._handle.uid}")
         async with trio.open_nursery() as nursery:
             await nursery.start(
-                trio.serve_tcp, self._handle_inbound_connection, self._port)
+                trio.serve_tcp, self._handle_inbound_connection, self._handle.port)
             print("Listening")
 
             try:
@@ -152,8 +109,8 @@ class Client:
             print("Worker run error", type(e), *e.args)
             raise UserError from e
 
-    def _get_peers(self):
-        return [conn.as_peer() for conn in self._peers.values()]
+    def _get_peers(self) -> list[Peer]:
+        return [_peer_from_duplex_connection(conn) for conn in self._peer_connections]
 
     async def _send_to_server(self, tag: str, data: Any, pickle=False):
         if pickle:
@@ -170,42 +127,49 @@ class Client:
     async def _receive_server_messages(
             self,
             nursery: trio.Nursery,
-            cancel_scope: trio.CancelScope) -> None:
+            cancel_scope: trio.CancelScope) -> NoReturn:
         print("Waiting for messages")
         while True:
-            try:
-                with trio.fail_after(0.01):
-                    async with self._server_lock:
-                        messagetype, payload = await Message.recv(self._server_stream)
-            except trio.TooSlowError:
-                continue
-            except Exception as e:
-                print("Did not receive valid message:", type(e), *e.args)
-                continue
+            await self._receive_server_message(nursery, cancel_scope)
 
-            print(messagetype.name, "received")
-            # TODO: Validate full payload by message type in one step before
-            #       dispatch
-            match messagetype:
-                case Message.Shutdown:
-                    cancel_scope.cancel()
-                    print("Server connection closing")
-                    return
-                case Message.NewPeer:
-                    nursery.start_soon(self._peer_connect_ping,
-                                       ClientHandle.from_dict(payload))
-                case Message.RemovePeer:
-                    await self._remove_peer(UUID(bytes=payload["uid"]))
-                case Message.ClientMessage:
-                    tag, data = payload["tag"], payload["data"]
-                    try:
-                        await self._worker.handle_server_message(tag, data)
-                    except Exception as e:
-                        print("Exception occurred in handle_server_message:", type(e), *e.args)
-                        raise UserError from e
-                case _:
-                    print("Unhandled message:", messagetype.name,
-                          "Payload:", payload)
+    @utils.noexcept("Server message")
+    async def _receive_server_message(
+            self,
+            nursery: trio.Nursery,
+            cancel_scope: trio.CancelScope) -> None:
+        try:
+            with trio.fail_after(0.01):
+                async with self._server_lock:
+                    messagetype, payload = await Message.recv(self._server_stream)
+        except trio.TooSlowError:
+            return
+        except Exception as e:
+            print("Did not receive valid message:", type(e), *e.args)
+            return
+
+        print(messagetype.name, "received")
+        # TODO: Validate full payload by message type in one step before
+        #       dispatch
+        match messagetype:
+            case Message.Shutdown:
+                cancel_scope.cancel()
+                print("Server connection closing")
+                return
+            case Message.NewPeer:
+                peer = ClientHandle.from_dict(payload)
+                nursery.start_soon(self._peer_connections.initiate, peer)
+            case Message.RemovePeer:
+                await self._peer_connections.aclose(UUID(bytes=payload["uid"]))
+            case Message.ClientMessage:
+                tag, data = payload["tag"], payload["data"]
+                try:
+                    await self._worker.handle_server_message(tag, data)
+                except Exception as e:
+                    # TODO: Print tb
+                    raise UserError from e
+            case _:
+                print("Unhandled message:", messagetype.name,
+                      "Payload:", payload)
 
     @utils.noexcept("Inbound connection")
     async def _handle_inbound_connection(
@@ -215,138 +179,64 @@ class Client:
             message, payload = await Message.recv(recv_stream)
             peer = ClientHandle.from_dict(
                 {"hostname": utils.get_hostname(recv_stream)} | payload)
-            if peer.uid == self._uid:
+            if peer.uid == self._handle.uid:
                 raise ValueError("UID collision")
         except Exception:
             async with recv_stream:
                 await Status.Failure.send(recv_stream)
             raise
 
+        print("Peer received")
+        match message:
+            case Message.ConnectPing:
+                print("Them -> Me")
+                await self._peer_connections.establish_from_ping(peer, recv_stream)
+
+            case Message.ConnectPong:
+                print("Them -> Me")
+                await self._peer_connections.establish_from_pong(peer, recv_stream)
+
+            case _:
+                raise ValueError("Unhandled message:", message, payload)
+
         try:
-            print("Peer received")
-            match message:
-                case Message.ConnectPing:
-                    print("Them -> Me")
-                    if peer.uid in self._peers | self._incomplete_connections:
-                        await Status.Failure.send(recv_stream)
-                        raise SequenceError("Peer already connected!")
-
-                    conn = self._incomplete_connections[peer.uid] = (
-                        _PeerConnection(peer=peer, lock=trio.Lock()))
-                    conn.recv = recv_stream
-                    await Status.Success.send(recv_stream)
-                    await self._peer_connect_pong(conn)
-
-                case Message.ConnectPong:
-                    print("Them -> Me")
-                    if peer.uid in self._peers:
-                        raise SequenceError("Pong peer already connected")
-                    if peer.uid not in self._incomplete_connections:
-                        raise SequenceError("Pong from unknown peer")
-                    if not self._incomplete_connections[peer.uid].send:
-                        raise SequenceError("Pong peer has no connection")
-                    if self._incomplete_connections[peer.uid].recv:
-                        raise SequenceError("Pong peer already has recv connection")
-
-                    self._incomplete_connections[peer.uid].recv = recv_stream
-                    await Status.Success.send(recv_stream)
-                    self._complete_connection(peer.uid)
-
-                case _:
-                    raise ValueError("Unhandled message:", message, payload)
-
-            async for msg in recv_stream:
-                try:
-                    try:
-                        messagetype, payload = Message.from_bytes(msg)
-                        assert messagetype == Message.ClientMessage, messagetype
-                        tag = payload["tag"]
-                        data = payload["data"]
-                    except Exception:
-                        print("Unexpected message from peer")
-                        raise
-
-                    try:
-                        result = await self._worker.handle_peer_message(
-                            peer, tag, data)
-                    except Exception as e:
-                        # TODO: print bt
-                        print("User-code exception in handle_peer_message:", type(e), *e.args)
-                        raise UserError from e
-
-                    if result is None:
-                        result = True
-
-                    if result:
-                        await Status.Success.send(recv_stream)
-                    else:
-                        await Status.Failure.send(recv_stream)
-                except:
-                    # FIXME: May reraise if stream gone
-                    await Status.Failure.send(recv_stream)
-                    raise
+            await self._poll_peer(peer)
         finally:
-            await self._remove_peer(peer.uid)
+            await self._peer_connections.aclose(peer.uid)
 
-    @utils.noexcept("Initiating peer connection")
-    async def _peer_connect_ping(self, peer: ClientHandle) -> None:
-        """If A -> B and then B -> A, this function is A -> B"""
-        print("Starting ping connection")
-        if peer.uid == self._uid:
-            raise InternalError("Received myself as peer!")
-        if peer.uid in self._incomplete_connections:
-            raise SequenceError("Already have peer!")
+    async def _poll_peer(self, peer) -> NoReturn:
+        recv_stream = self._peer_connections[peer.uid].recv
+        async for msg in recv_stream:
+            try:
+                try:
+                    messagetype, payload = Message.from_bytes(msg)
+                    assert messagetype == Message.ClientMessage, messagetype
+                    tag = payload["tag"]
+                    data = payload["data"]
+                except Exception:
+                    print("Unexpected message from peer")
+                    raise
 
-        conn = self._incomplete_connections[peer.uid] = _PeerConnection(peer=peer, lock=trio.Lock())
-        await self._open_send_stream(conn, Message.ConnectPing)
+                try:
+                    result = await self._worker.handle_peer_message(
+                        peer, tag, data)
+                except Exception as e:
+                    # TODO: print bt
+                    print("User-code exception in handle_peer_message:", type(e), *e.args)
+                    raise UserError from e
 
-    async def _peer_connect_pong(self, conn: _PeerConnection) -> None:
-        """If A -> B and then B -> A, this function is B -> A"""
-        print("Starting pong connection")
-        await self._open_send_stream(conn, Message.ConnectPong)
-        self._complete_connection(conn.peer.uid)
+                if result is None:
+                    result = True
 
-    def _complete_connection(self, uid: UUID) -> None:
-        print("Peer connection complete", uid)
-        self._peers[uid] = self._incomplete_connections.pop(uid)
-
-    async def _open_send_stream(
-            self, conn: _PeerConnection, message: Message) -> None:
-        async with conn.lock:
-            print("Me -> Them")
-            send_stream = await trio.open_tcp_stream(
-                conn.peer.hostname,
-                conn.peer.port)
-            conn.send = send_stream
-        await message.send(
-            send_stream,
-            port=self._port,
-            uid=self._uid.bytes
-        )
-        try:
-            await Status.Success.expect(send_stream)
-        except Exception:
-            await self._remove_peer(conn.peer.uid)
-            raise
-
-    async def _remove_peer(self, uid: UUID) -> None:
-        if not isinstance(uid, UUID):
-            raise TypeError("Peer must be passed as UUID")
-        print("Removing peer", uid)
-        if uid in self._peers:
-            conn = self._peers.pop(uid)
-        elif uid in self._incomplete_connections:
-            conn = self._incomplete_connections.pop(uid)
-        else:
-            print("No such peer:", uid)
-            return
-
-        async with conn.lock:
-            if conn.send:
-                await conn.send.aclose()
-            if conn.recv:
-                await conn.recv.aclose()
-        print("Removed peer:", conn.peer)
+                if result:
+                    await Status.Success.send(recv_stream)
+                else:
+                    # FIXME: May double-send if raises
+                    await Status.Failure.send(recv_stream)
+            except:
+                # FIXME: May reraise if stream gone
+                await Status.Failure.send(recv_stream)
+                raise
 
     async def _connect_to_server(self,
                                  server_hostname: str,
@@ -359,8 +249,8 @@ class Client:
             await Message.ConnectPing.send(
                 server_stream,
                 key=registration_key,
-                port=self._port,
-                uid=self._uid.bytes
+                port=self._handle.port,
+                uid=self._handle.uid.bytes
             )
 
             registration_response = cpkl.loads(await server_stream.receive_some())
@@ -370,7 +260,7 @@ class Client:
             if registration_response["status"] != Status.Success:
                 # TODO: Retry until successful or the client is shut down
                 raise RuntimeError("Server signalled registration failure")
-            self._hostname = registration_response["hostname"]
+            self._handle.hostname = registration_response["hostname"]
         except BaseException:
             await server_stream.aclose()
             raise

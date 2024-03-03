@@ -7,8 +7,8 @@ import cloudpickle as cpkl
 import trio
 
 from . import utils
+from ._client_handle import ClientHandle
 from .message import Message, Status
-from .client import ClientHandle
 
 
 @dataclass(frozen=True, slots=True)
