@@ -26,7 +26,7 @@ class ClientMessageSender:
         self._await_response = await_response
 
     async def __call__(self, tag: str, data: Any, pickle=False) -> bool:
-        # TODO: If _send socket has broken, need to remove peer/server
+        # TODO: If stream has broken, need to remove peer/server
         if pickle:
             data = cpkl.dumps(data)
         try:
@@ -111,17 +111,16 @@ class Client:
 
     async def _run_worker(self):
         try:
-            await self._worker.run(self._get_peers, ClientMessageSender(
-                stream=self._server_stream,
-                lock=self._server_lock,
-                await_response=False
+            await self._worker.run(
+                peers=lambda: [_peer_from_duplex_connection(conn) for conn in self._peer_connections],
+                server_send=ClientMessageSender(
+                    stream=self._server_stream,
+                    lock=self._server_lock,
+                    await_response=False
             ))
         except Exception as e:
             print("Worker run error", type(e), *e.args)
             raise UserError from e
-
-    def _get_peers(self) -> list[Peer]:
-        return [_peer_from_duplex_connection(conn) for conn in self._peer_connections]
 
     async def _receive_server_messages(self, nursery: trio.Nursery) -> NoReturn:
         print("Waiting for messages")
@@ -132,13 +131,13 @@ class Client:
     @utils.noexcept("Server message handler")
     async def _receive_server_message(self, nursery: trio.Nursery) -> None:
         try:
+            # NOTE: Cannot simply poll socket at OS level, as this blocks us
+            #       (our worker) from sending data on the same stream.
+            #       Hence use of fail_after.
             with trio.fail_after(0.01):
                 async with self._server_lock:
                     messagetype, payload = await Message.recv(self._server_stream)
         except trio.TooSlowError:
-            return
-        except Exception as e:
-            print("Did not receive valid message:", type(e), *e.args)
             return
 
         print(messagetype.name, "received")
@@ -151,7 +150,7 @@ class Client:
                 return
             case Message.NewPeer:
                 peer = ClientHandle.from_dict(payload)
-                nursery.start_soon(self._peer_connections.initiate, peer)
+                nursery.start_soon(self._peer_connections.initiate_noexcept, peer)
             case Message.RemovePeer:
                 await self._peer_connections.aclose(UUID(bytes=payload["uid"]))
             case Message.ClientMessage:
@@ -222,12 +221,12 @@ class Client:
                 if result is None:
                     result = True
 
+                # FIXME: May double-send if raises
                 if result:
                     await Status.Success.send(recv_stream)
                 else:
-                    # FIXME: May double-send if raises
                     await Status.Failure.send(recv_stream)
-            except:
+            except BaseException:
                 # FIXME: May reraise if stream gone
                 await Status.Failure.send(recv_stream)
                 raise
