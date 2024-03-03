@@ -20,13 +20,19 @@ from .message import Message, Status
 class Peer:
     handle: ClientHandle
     _send: trio.SocketStream
+    _lock: trio.Lock
 
     async def send(self, tag: str, data: Any, pickle=False) -> bool:
         # TODO: If _send socket has broken, need to remove this peer from the
         # peer list
         if pickle:
             data = cpkl.dumps(data)
-        await Message.ClientMessage.send(self._send, tag=tag, data=data)
+        try:
+            async with self._lock:
+                await Message.ClientMessage.send(self._send, tag=tag, data=data)
+        except Exception as e:
+            print("Error occurred while sending data", type(e), *e.args)
+            return False
         try:
             await Status.Success.expect(self._send)
         except Exception:
@@ -36,7 +42,7 @@ class Peer:
 
 
 def _peer_from_duplex_connection(conn: _DuplexConnection):
-        return Peer(handle=conn.destination, _send=conn.send)
+        return Peer(handle=conn.destination, _send=conn.send, _lock=conn.lock)
 
 
 class Worker(ABC):
@@ -84,23 +90,15 @@ class Client:
                     server_hostname, server_port, registration_key)
             except Exception as e:
                 print("Failed to connect to server:", type(e), *e.args)
-                nursery.cancel_scope.cancel()
                 raise
             print("Connected to server")
 
-            async with self._server_stream:
-                await self._run(nursery.cancel_scope)
-        # TODO: Clean up internal state
-        print("Client done")
-
-    async def _run(
-            self,
-            cancel_scope: trio.CancelScope) -> None:
-        async with trio.open_nursery() as nursery:
             nursery.start_soon(self._run_worker)
             # NOTE: Must start polling server after starting worker
-            nursery.start_soon(self._receive_server_messages,
-                               nursery, cancel_scope)
+            nursery.start_soon(self._receive_server_messages, nursery)
+
+        # TODO: Clean up internal state
+        print("Client done")
 
     async def _run_worker(self):
         try:
@@ -124,19 +122,14 @@ class Client:
             return False
         return True
 
-    async def _receive_server_messages(
-            self,
-            nursery: trio.Nursery,
-            cancel_scope: trio.CancelScope) -> NoReturn:
+    async def _receive_server_messages(self, nursery: trio.Nursery) -> NoReturn:
         print("Waiting for messages")
-        while True:
-            await self._receive_server_message(nursery, cancel_scope)
+        async with self._server_stream:
+            while True:
+                await self._receive_server_message(nursery)
 
-    @utils.noexcept("Server message")
-    async def _receive_server_message(
-            self,
-            nursery: trio.Nursery,
-            cancel_scope: trio.CancelScope) -> None:
+    @utils.noexcept("Server message handler")
+    async def _receive_server_message(self, nursery: trio.Nursery) -> None:
         try:
             with trio.fail_after(0.01):
                 async with self._server_lock:
@@ -152,7 +145,7 @@ class Client:
         #       dispatch
         match messagetype:
             case Message.Shutdown:
-                cancel_scope.cancel()
+                nursery.cancel_scope.cancel()
                 print("Server connection closing")
                 return
             case Message.NewPeer:
