@@ -62,6 +62,14 @@ def as_coroutine(f):
     return call
 
 
+async def open_tcp_stream_retry(*args, wait: float = 1, **kargs) -> trio.SocketStream:
+    while True:
+        try:
+            return await trio.open_tcp_stream(*args, **kargs)
+        except OSError:
+            await trio.sleep(wait)
+
+
 def set_keepalive(sock: socket.socket) -> None:
     # FIXME: One of these settings becomes irrelevant when USER_TIMEOUT
     #        provided... remember which one

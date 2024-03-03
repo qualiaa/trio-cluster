@@ -101,7 +101,6 @@ class Client:
             except Exception as e:
                 print("Failed to connect to server:", type(e), *e.args)
                 raise
-            print("Connected to server")
 
             nursery.start_soon(self._run_worker)
             # NOTE: Must start polling server after starting worker
@@ -238,7 +237,9 @@ class Client:
                                  server_port: int,
                                  registration_key: str
                                  ) -> None:
-        server_stream = await trio.open_tcp_stream(server_hostname, server_port)
+        print("Connecting to server")
+        server_stream = await utils.open_tcp_stream_retry(server_hostname, server_port)
+        print("Connected")
 
         try:
             await Message.ConnectPing.send(
