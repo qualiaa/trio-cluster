@@ -1,5 +1,6 @@
 from collections.abc import Iterator, Iterable
 from dataclasses import dataclass
+from logging import getLogger
 from typing import Self
 from uuid import UUID
 
@@ -9,6 +10,9 @@ from ._client_handle import ClientHandle
 from ._exc import *
 from .message import Message, Status
 from . import utils
+
+
+_LOG = getLogger(__name__)
 
 
 @dataclass(slots=True, frozen=True)
@@ -66,9 +70,7 @@ class _IncompleteConnection:
                        in_progress: dict[UUID, Self],
                        finished: dict[UUID, _DuplexConnection]) -> Self:
         """Send A -> B"""
-        print("Starting ping connection")
         self = cls(_me=me, _destination=destination, _in_progress=in_progress, _finished=finished)
-        print("Next")
         await self._open_send_stream(Message.ConnectPing)
         return self
 
@@ -123,7 +125,7 @@ class _IncompleteConnection:
     async def _open_send_stream(self, message: Message) -> None:
         # FIXME: Do we need a lock here?
         async with self._lock:
-            print("Me -> Them")
+            _LOG.debug("Me -> Them")
             send_stream = await trio.open_tcp_stream(self._destination.hostname,
                                                      self._destination.port)
             self._send = send_stream
@@ -160,6 +162,7 @@ class ConnectionManager:
             destination: ClientHandle,
             recv_stream: trio.SocketStream
     ) -> _DuplexConnection:
+        _LOG.debug("Them -> Me")
         conn = await _IncompleteConnection.establish_from_ping(
             self._handle,
             destination,
@@ -174,6 +177,7 @@ class ConnectionManager:
             destination: ClientHandle,
             recv_stream: trio.SocketStream
     ) -> _DuplexConnection:
+        _LOG.debug("Them -> Me")
         try:
             try:
                 conn = self._in_progress[destination.uid]
@@ -186,25 +190,26 @@ class ConnectionManager:
         return self._complete(conn.destination.uid)
 
     async def initiate(self, destination: ClientHandle) -> _IncompleteConnection:
+        _LOG.debug("Starting ping connection")
         return await _IncompleteConnection.initiate(
             self._handle, destination, self._in_progress, self._connections)
 
-    @utils.noexcept("Initiating duplex connection")
+    @utils.noexcept("Initiating duplex connection", log=_LOG)
     async def initiate_noexcept(self, *args, **kargs) -> _IncompleteConnection:
         return await self.initiate(*args, **kargs)
 
     async def aclose(self, uid: UUID) -> None:
-        print("Removing connection", uid)
+        _LOG.info("Removing connection %s", uid)
         if uid in self._connections:
             conn = self._connections.pop(uid)
         elif uid in self._in_progress:
             conn = self._in_progress.pop(uid)
         else:
-            print("No such connection:", uid)
+            _LOG.info("No such connection: %s", uid)
             return
 
         await conn.aclose()
-        print("Removed connection:", uid)
+        _LOG.info("Removed connection: %s", uid)
 
     def _complete(self, uid: UUID) -> _DuplexConnection:
         conn = self._connections[uid] = self._in_progress.pop(uid).complete()

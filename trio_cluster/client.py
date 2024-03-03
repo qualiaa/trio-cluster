@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable
 from dataclasses import dataclass
+from logging import getLogger
 from typing import Any, Callable, NoReturn, Optional, Self
 from uuid import UUID, uuid4
 
@@ -14,6 +15,9 @@ from ._duplex_connection import (
     ConnectionManager)
 from ._exc import *
 from .message import Message, Status
+
+
+_LOG = getLogger(__name__)
 
 
 class ClientMessageSender:
@@ -33,13 +37,13 @@ class ClientMessageSender:
             async with self._lock:
                 await Message.ClientMessage.send(self._stream, tag=tag, data=data)
         except Exception as e:
-            print("Error occurred while sending data", type(e), *e.args)
+            _LOG.exception("Error occurred while sending data")
             return False
         if self._await_response:
             try:
                 await Status.Success.expect(self._stream)
             except Exception:
-                print("Peer did not signal success")
+                _LOG.exception("Peer did not signal success")
                 return False
         return True
 
@@ -89,25 +93,21 @@ class Client:
                   server_hostname: str,
                   server_port: int,
                   registration_key: str) -> None:
-        print(f"Starting client {self._handle.uid}")
+        _LOG.info("Starting client %s", self._handle.uid)
         async with trio.open_nursery() as nursery:
             await nursery.start(
                 trio.serve_tcp, self._handle_inbound_connection, self._handle.port)
-            print("Listening")
+            _LOG.debug("Listening for peers")
 
-            try:
-                await self._connect_to_server(
-                    server_hostname, server_port, registration_key)
-            except Exception as e:
-                print("Failed to connect to server:", type(e), *e.args)
-                raise
+            await self._connect_to_server(
+                server_hostname, server_port, registration_key)
 
             nursery.start_soon(self._run_worker)
             # NOTE: Must start polling server after starting worker
             nursery.start_soon(self._receive_server_messages, nursery)
 
         # TODO: Clean up internal state
-        print("Client done")
+        _LOG.info("Client closing normally")
 
     async def _run_worker(self):
         try:
@@ -119,16 +119,16 @@ class Client:
                     await_response=False
             ))
         except Exception as e:
-            print("Worker run error", type(e), *e.args)
+            _LOG.exception("Worker error")
             raise UserError from e
 
     async def _receive_server_messages(self, nursery: trio.Nursery) -> NoReturn:
-        print("Waiting for messages")
+        _LOG.info("Polling server messages")
         async with self._server_stream:
             while True:
                 await self._receive_server_message(nursery)
 
-    @utils.noexcept("Server message handler")
+    @utils.noexcept(log=_LOG)
     async def _receive_server_message(self, nursery: trio.Nursery) -> None:
         try:
             # NOTE: Cannot simply poll socket at OS level, as this blocks us
@@ -140,13 +140,13 @@ class Client:
         except trio.TooSlowError:
             return
 
-        print(messagetype.name, "received")
+        _LOG.debug("%s received from server", messagetype.name)
         # TODO: Validate full payload by message type in one step before
         #       dispatch
         match messagetype:
             case Message.Shutdown:
                 nursery.cancel_scope.cancel()
-                print("Server connection closing")
+                _LOG.info("Server connection closed gracefully")
                 return
             case Message.NewPeer:
                 peer = ClientHandle.from_dict(payload)
@@ -158,16 +158,15 @@ class Client:
                 try:
                     await self._worker.handle_server_message(tag, data)
                 except Exception as e:
-                    # TODO: Print tb
                     raise UserError from e
             case _:
-                print("Unhandled message:", messagetype.name,
-                      "Payload:", payload)
+                _LOG.warning("Unhandled message: %s; Payload: %s",
+                             messagetype.name, payload)
 
-    @utils.noexcept("Inbound connection")
+    @utils.noexcept(log=_LOG)
     async def _handle_inbound_connection(
             self, recv_stream: trio.SocketStream) -> None:
-        print("Received connection")
+        _LOG.info("Received connection")
         try:
             message, payload = await Message.recv(recv_stream)
             peer = ClientHandle.from_dict(
@@ -179,14 +178,12 @@ class Client:
                 await Status.Failure.send(recv_stream)
             raise
 
-        print("Peer received")
+        _LOG.debug("Peer received")
         match message:
             case Message.ConnectPing:
-                print("Them -> Me")
                 await self._peer_connections.establish_from_ping(peer, recv_stream)
 
             case Message.ConnectPong:
-                print("Them -> Me")
                 await self._peer_connections.establish_from_pong(peer, recv_stream)
 
             case _:
@@ -207,15 +204,14 @@ class Client:
                     tag = payload["tag"]
                     data = payload["data"]
                 except Exception:
-                    print("Unexpected message from peer")
+                    _LOG.warning("Unexpected message from peer")
                     raise
 
                 try:
                     result = await self._worker.handle_peer_message(
                         peer, tag, data)
                 except Exception as e:
-                    # TODO: print bt
-                    print("User-code exception in handle_peer_message:", type(e), *e.args)
+                    _LOG.exception("User exception in handle_peer_message")
                     raise UserError from e
 
                 if result is None:
@@ -236,9 +232,9 @@ class Client:
                                  server_port: int,
                                  registration_key: str
                                  ) -> None:
-        print("Connecting to server")
+        _LOG.info("Connecting to server")
         server_stream = await utils.open_tcp_stream_retry(server_hostname, server_port)
-        print("Connected")
+        _LOG.info("Connected")
 
         try:
             await Message.ConnectPing.send(
@@ -259,5 +255,5 @@ class Client:
         except BaseException:
             await server_stream.aclose()
             raise
-        print("Registered!")
+        _LOG.debug("Registered!")
         self._server_stream = server_stream

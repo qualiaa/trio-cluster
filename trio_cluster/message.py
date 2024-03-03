@@ -81,7 +81,6 @@ class Status(MessageBase):
     Failure = next(_unique)
 
     async def send(self, stream: trio.SocketStream) -> None:
-        print(f"Sending {self.name}")
         await stream.send_all(bytes(self))
 
     @classmethod

@@ -1,9 +1,12 @@
 import socket
+from logging import getLogger
 from functools import wraps
 from inspect import iscoroutinefunction
 from typing import NoReturn
 
 import trio
+
+_LOG = getLogger(__name__)
 
 
 async def race(async_fn, *async_fns):
@@ -35,7 +38,7 @@ def get_hostname(stream) -> str:
     return stream.socket.getpeername()[0]
 
 
-def noexcept(name: str, *to_throw):
+def noexcept(*to_throw, log=None):
     def decorator(f):
         @wraps(f)
         async def wrapped(*args, **kargs):
@@ -44,7 +47,8 @@ def noexcept(name: str, *to_throw):
             except to_throw:
                 raise
             except Exception as e:
-                print(name, "failed:", type(e), *e.args)
+                (log or _LOG).warning("Ignoring exception in %s: %s %s ",
+                                      f.__name__, type(e), *e.args)
         return wrapped
     return decorator
 

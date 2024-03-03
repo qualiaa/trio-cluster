@@ -1,3 +1,4 @@
+import logging
 from argparse import ArgumentParser
 from typing import Any
 
@@ -50,6 +51,8 @@ class Worker(WorkerBase):
 
 
 def run(args):
+    if args.verbose:
+        logging.basicConfig(level=logging.DEBUG)
     worker = Client(args.port, Worker())
     try:
         trio.run(worker.run,
@@ -66,6 +69,7 @@ def main():
     parser.add_argument("-p", "--port", type=int, default=C.DEFAULT_CLIENT_PORT)
     parser.add_argument("-H", "--server-hostname", default="localhost")
     parser.add_argument("-P", "--server-port", type=int, default=C.DEFAULT_SERVER_PORT)
+    parser.add_argument("-v", "--verbose", action="store_true")
     run(parser.parse_args())
 
 

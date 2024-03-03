@@ -1,3 +1,4 @@
+import logging
 import time
 from argparse import ArgumentParser
 
@@ -33,6 +34,8 @@ class Manager(BaseManager):
 
 
 def run(args):
+    if args.verbose:
+        logging.basicConfig(level=logging.DEBUG)
     server = Server(args.registration_key, args.port, Manager())
     try:
         trio.run(server.listen)
@@ -44,6 +47,8 @@ def main():
     parser = ArgumentParser()
     parser.add_argument("registration_key")
     parser.add_argument("-p", "--port", type=int, default=C.DEFAULT_SERVER_PORT)
+    parser.add_argument("-v", "--verbose", action="store_true")
+
     run(parser.parse_args())
 
 
