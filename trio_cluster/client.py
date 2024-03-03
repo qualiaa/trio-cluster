@@ -125,20 +125,12 @@ class Client:
     async def _receive_server_messages(self, nursery: trio.Nursery) -> NoReturn:
         _LOG.info("Polling server messages")
         async with self._server_stream:
-            while True:
-                await self._receive_server_message(nursery)
+            async for msg in self._server_stream:
+                await self._handle_server_message(msg, nursery)
 
     @utils.noexcept(log=_LOG)
-    async def _receive_server_message(self, nursery: trio.Nursery) -> None:
-        try:
-            # NOTE: Cannot simply poll socket at OS level, as this blocks us
-            #       (our worker) from sending data on the same stream.
-            #       Hence use of fail_after.
-            with trio.fail_after(0.01):
-                async with self._server_lock:
-                    messagetype, payload = await Message.recv(self._server_stream)
-        except trio.TooSlowError:
-            return
+    async def _handle_server_message(self, msg, nursery: trio.Nursery) -> None:
+        messagetype, payload = Message.from_bytes(msg)
 
         _LOG.debug("%s received from server", messagetype.name)
         # TODO: Validate full payload by message type in one step before
