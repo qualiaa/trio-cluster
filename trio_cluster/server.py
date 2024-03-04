@@ -34,15 +34,103 @@ class Client:
 
 
 class Manager(ABC):
+    """Implement this interface with your server logic.
+
+    Note that the methods of this interface are called in in the main thread.
+    To prevent starvation of server networking tasks, you must ensure a Trio
+    checkpoint is called within a reasonable timeframe (ideally <1s). One
+    way to achieve this is:
+
+    >>> await trio.sleep(SECONDS)
+
+    Another way is to open a nursery and spawn subtasks (which also must
+    ultimately hit checkpoints):
+
+    >>> async with trio.open_nursery() as nursery:
+    >>>     nursery.start_soon(my_task, *args)
+
+    Yet another way is to call
+
+    >>> await trio.lowlevel.checkpoint()
+
+    which immediately switches and puts the task at the back of the schedule.
+
+    Your code may be "cancelled" at any checkpoint - for information on what
+    this means and how to protect operations from cancellation, see
+    https://trio.readthedocs.io/en/stable/reference-core.html#cancellation-and-timeouts
+    """
     @abstractmethod
     async def run(self, clients: Callable[[], list[Client]]):
-        ...
+        """Manager main task. If this returns, the server will shut down.
+
+        If you have no main logic and only wish to respond to messages in
+        handler methods, you must still ensure this method does not return, and
+        also not block the main thread. One way to achieve this is:
+
+        >>> await trio.sleep_forever()
+
+        Alternatively, a simple loop may suffice for many purposes:
+
+        >>> while True:
+        >>>     ...  # One step of worker logic
+        >>>     await trio.sleep(0.1)
+
+        clients is a callable which returns a list of *currently active*
+        clients. Calling clients() may yield different results on either side
+        of a Trio checkpoint -- at the moment this method is invoked, clients()
+        should return the empty list. You should call it repeatedly in order to
+        get an up-to-date list.
+
+        This method runs in its own task. In order to allow other methods to
+        parent their tasks to this one, you should open a nursery here and
+        store it as an attribute:
+
+        >>> async with trio.open_nursery() as nursery:
+        >>>     self._nursery = nursery  # Make nursery available to
+        >>>                              # handle_client_message
+        >>>     ... # Do something to keep nursery alive (e.g. trio.sleep_forever())
+
+        Then other methods can spawn sub-tasks under this nursery:
+
+        >>> self._nursery.start_soon(task, *args)
+        """
 
     async def handle_client_message(self, client: Client, tag: str, data: Any):
-        pass
+        """Handle a message from a client.
+
+        This is guaranteed not to be called before new_client for the specific
+        client
+
+        tag and data are determined by the matching call from the Worker to
+        server_send(tag, data) which produced the message. A useful pattern is:
+
+        >>> match tag:
+        >>>     case "command_a": ...  # Process command A
+        >>>     case "command_b": ...  # Process command B
+        >>>     ...
+
+        Note: This function is called within client's dedicated task. Due to
+        this, you should aim to return as quickly as possible to avoid a
+        backlog of messages from this client. If a message instigates a long
+        computation or ongoing process, you should parent it to your main task
+        - see the Manager.run docstring (note also the caveats in the class
+        docstring).
+        """
 
     async def new_client(self, client):
-        pass
+        """Handle new client.
+
+        You may use this method to do book-keeping and also to send clients an
+        initial message upon connection. It is guaranteed to be called before
+        the client sends a message or appears in the result of clients().
+
+        Note: This function is called within client's dedicated task. Due to
+        this, you should aim to return as quickly as possible to avoid a
+        backlog of messages from this client. If a message instigates a long
+        computation or ongoing process, you should parent it to your main task
+        - see the Manager.run docstring (note also the caveats in the class
+        docstring).
+        """
 
 
 class Server:

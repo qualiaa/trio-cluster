@@ -60,19 +60,113 @@ def _peer_from_duplex_connection(conn: _DuplexConnection):
 
 
 class Worker(ABC):
+    """Implement this interface with your worker logic.
+
+    Note that the methods of this interface are called in in the main thread.
+    To prevent starvation of client networking tasks, you must ensure a Trio
+    checkpoint is called within a reasonable timeframe (ideally <1s). One
+    way to achieve this is:
+
+    >>> await trio.sleep(SECONDS)
+
+    Another way is to open a nursery and spawn subtasks (which also must
+    ultimately hit checkpoints):
+
+    >>> async with trio.open_nursery() as nursery:
+    >>>     self._nursery = nursery  # Make nursery available to
+    >>>                              # handle_client_message
+    >>>     nursery.start_soon(my_task, *args)
+
+    Yet another way is to call
+
+    >>> await trio.lowlevel.checkpoint()
+
+    which immediately switches and puts the task at the back of the schedule.
+
+    Your code may be "cancelled" at any checkpoint - for information on what
+    this means and how to protect operations from cancellation, see
+    https://trio.readthedocs.io/en/stable/reference-core.html#cancellation-and-timeouts
+    """
     @abstractmethod
     async def run(
             self,
             peers: Callable[[], list[Peer]],
             server_send: ClientMessageSender
     ):
-        ...
+        """Worker main task. If this returns, the client will shut down.
+
+        If you have no main logic and only wish to respond to messages in
+        handler methods, you must still ensure this method does not return, and
+        also not block the main thread. One way to achieve this is:
+
+        >>> await trio.sleep_forever()
+
+        Alternatively, a simple loop may suffice for many purposes:
+
+        >>> while True:
+        >>>     ...  # One step of worker logic
+        >>>     await trio.sleep(0.1)
+
+        peers is a callable which returns a list of *currently active*
+        peers. Calling peers() may yield different results on either side
+        of a Trio checkpoint -- at the moment this method is invoked, peers()
+        should return the empty list. You should call it repeatedly in order to
+        get an up-to-date list.
+
+        This method runs in its own task. In order to allow other methods to
+        parent their tasks to this one, you should open a nursery here and
+        store it as an attribute:
+
+        >>> async with trio.open_nursery() as nursery:
+        >>>     self._nursery = nursery  # Make nursery available to
+        >>>                              # handle_client_message
+        >>>     ... # Do something to keep nursery alive (e.g. trio.sleep_forever())
+
+        Then other methods can spawn sub-tasks under this nursery:
+
+        >>> self._nursery.start_soon(task, *args)
+        """
 
     async def handle_peer_message(self, peer_handle: ClientHandle, tag: str, data: Any):
-        ...
+        """Handle a message from a peer.
+
+        peer describes the peer information, but note that you cannot reply to
+        the message from this method.
+
+        tag and data are determined by the matching call to
+        peer.send(tag, data) which produced the message. A useful pattern is:
+
+        >>> match tag:
+        >>>     case "command_a": ...  # Process command A
+        >>>     case "command_b": ...  # Process command B
+        >>>     ...
+
+        Note: This function is called within peer's dedicated task. Due to
+        this, you should aim to return as quickly as possible to avoid a
+        backlog of messages from this peer. If a message instigates a long
+        computation or ongoing process, you should parent it to your main task
+        - see the Worker.run docstring (note also the caveats in the class
+        docstring).
+        """
 
     async def handle_server_message(self, tag: str, data: Any):
-        ...
+        """Handle a message from the manager.
+
+        tag and data are determined by the matching call to client.send(tag,
+        data) which produced the message. A useful pattern is:
+
+        >>> match tag:
+        >>>     case "command_a": ...  # Process command A
+        >>>     case "command_b": ...  # Process command B
+        >>>     ...
+
+        Note: This function is called within the server's dedicated task. Due
+        to this, you should aim to return as quickly as possible to avoid a
+        backlog of messages from the server. If a message instigates a long
+        computation or ongoing process, you should parent it to your main task
+        - see the Worker.run docstring (note also the caveats in the class
+        docstring).
+        """
 
 
 class Client:
