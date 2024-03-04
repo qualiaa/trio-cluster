@@ -38,7 +38,16 @@ def get_hostname(stream) -> str:
     return stream.socket.getpeername()[0]
 
 
-def noexcept(*to_throw, log=None):
+def noexcept(*to_throw, log=None, catch_base=False):
+    if to_throw:
+        # Special handling if first argument is a callable to wrap
+        first, *rest = to_throw
+        is_exc = isinstance(first, type) and issubclass(first, BaseException)
+        if callable(first) and not is_exc:
+            return noexcept(*rest, log=log)(first)
+
+    catch = BaseException if catch_base else Exception
+
     def decorator(f):
         @wraps(f)
         async def wrapped(*args, **kargs):
@@ -46,9 +55,9 @@ def noexcept(*to_throw, log=None):
                 return await f(*args, **kargs)
             except to_throw:
                 raise
-            except Exception as e:
+            except catch as e:
                 (log or _LOG).warning("Ignoring exception in %s: %s %s ",
-                                      f.__name__, type(e), *e.args)
+                                      f.__qualname__, type(e), *e.args)
         return wrapped
     return decorator
 
