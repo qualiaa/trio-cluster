@@ -1,8 +1,6 @@
 from abc import ABC, abstractmethod
-from collections.abc import Awaitable
-from dataclasses import dataclass
 from logging import getLogger
-from typing import Any, Callable, NoReturn, Optional, Self
+from typing import Any, Callable, Optional
 from uuid import UUID, uuid4
 
 import cloudpickle as cpkl
@@ -145,6 +143,7 @@ class Client:
         self._server_stream: Optional[trio.SocketStream] = None
 
         self._peer_connections = ConnectionManager(self._handle)
+        self._nursery: trio.Nursery = None
 
     async def run(self,
                   server_hostname: str,
@@ -152,6 +151,7 @@ class Client:
                   registration_key: str) -> None:
         _LOG.info("Starting client %s", self._handle.uid)
         async with trio.open_nursery() as nursery:
+            self._nursery = nursery
             await nursery.start(
                 trio.serve_tcp, self._handle_inbound_connection, self._handle.port)
             _LOG.debug("Listening for peers")
@@ -161,12 +161,12 @@ class Client:
 
             nursery.start_soon(self._run_worker)
             # NOTE: Must start polling server after starting worker
-            nursery.start_soon(self._receive_server_messages, nursery)
+            nursery.start_soon(self._receive_server_messages)
 
         # TODO: Clean up internal state
         _LOG.info("Client closing normally")
 
-    async def _run_worker(self):
+    async def _run_worker(self) -> None:
         try:
             await self._worker.run(
                 peers=lambda: [_peer_from_duplex_connection(conn)
@@ -176,17 +176,22 @@ class Client:
                     lock=self._server_lock,
                     await_response=False))
         except Exception as e:
-            _LOG.exception("Worker error")
+            _LOG.exception("User exception in run")
             raise UserError from e
+        # Worker has closed gracefully
+        self._nursery.cancel_scope.cancel()
 
-    async def _receive_server_messages(self, nursery: trio.Nursery) -> NoReturn:
+    async def _receive_server_messages(self) -> None:
         _LOG.info("Polling server messages")
+        if self._server_stream is None:
+            raise InternalError("Trying to receive without server stream")
+
         async with self._server_stream:
             async for msg in self._server_stream:
-                await self._handle_server_message(msg, nursery)
+                await self._handle_server_message(msg)
 
     @utils.noexcept(log=_LOG)
-    async def _handle_server_message(self, msg, nursery: trio.Nursery) -> None:
+    async def _handle_server_message(self, msg) -> None:
         messagetype, payload = Message.from_bytes(msg)
 
         _LOG.debug("%s received from server", messagetype.name)
@@ -194,12 +199,13 @@ class Client:
         #       dispatch
         match messagetype:
             case Message.Shutdown:
-                nursery.cancel_scope.cancel()
+                self._nursery.cancel_scope.cancel()
                 _LOG.info("Server connection closed gracefully")
                 return
             case Message.NewPeer:
                 peer = ClientHandle.from_dict(payload)
-                nursery.start_soon(self._peer_connections.initiate_noexcept, peer)
+                self._nursery.start_soon(
+                    self._peer_connections.initiate_noexcept, peer)
             case Message.RemovePeer:
                 await self._peer_connections.aclose(UUID(bytes=payload["uid"]))
             case Message.ClientMessage:
@@ -207,6 +213,7 @@ class Client:
                 try:
                     await self._worker.handle_server_message(tag, data)
                 except Exception as e:
+                    _LOG.exception("User exception in handle_server_message")
                     raise UserError from e
             case _:
                 _LOG.warning("Unhandled message: %s; Payload: %s",
@@ -243,10 +250,11 @@ class Client:
         finally:
             await self._peer_connections.aclose(peer.uid)
 
-    async def _poll_peer(self, peer) -> NoReturn:
+    async def _poll_peer(self, peer: ClientHandle) -> None:
         recv_stream = self._peer_connections[peer.uid].recv
         async for msg in recv_stream:
             try:
+                # TODO: Align all message parsing exceptions
                 try:
                     messagetype, payload = Message.from_bytes(msg)
                     assert messagetype == Message.ClientMessage, messagetype
@@ -262,19 +270,17 @@ class Client:
                 except Exception as e:
                     _LOG.exception("User exception in handle_peer_message")
                     raise UserError from e
-
-                if result is None:
-                    result = True
-
-                # FIXME: May double-send if raises
-                if result:
-                    await Status.Success.send(recv_stream)
-                else:
-                    await Status.Failure.send(recv_stream)
             except BaseException:
-                # FIXME: May reraise if stream gone
-                await Status.Failure.send(recv_stream)
+                try:
+                    await Status.Failure.send(recv_stream)
+                except Exception:
+                    pass
                 raise
+
+            if result or result is None:
+                await Status.Success.send(recv_stream)
+            else:
+                await Status.Failure.send(recv_stream)
 
     async def _connect_to_server(self,
                                  server_hostname: str,
@@ -293,13 +299,14 @@ class Client:
                 uid=self._handle.uid.bytes
             )
 
+            # TODO: No need to use cpkl here any more
             registration_response = cpkl.loads(await server_stream.receive_some())
 
             if registration_response["status"] == Status.BadKey:
                 raise RuntimeError("Incorrect registration key")
             if registration_response["status"] != Status.Success:
-                # TODO: Retry until successful or the client is shut down
-                raise RuntimeError("Server signalled registration failure")
+                raise RuntimeError("Server signalled unexplained registration failure")
+
             self._handle.hostname = registration_response["hostname"]
         except BaseException:
             await server_stream.aclose()

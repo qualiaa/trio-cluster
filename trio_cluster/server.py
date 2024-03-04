@@ -9,6 +9,8 @@ import trio
 
 from . import utils
 from ._client_handle import ClientHandle
+from ._connected_client import ConnectedClient, ClientMessageSender
+from ._exc import UserError, STREAM_ERRORS
 from .message import Message, Status
 
 _LOG = getLogger(__name__)
@@ -141,7 +143,7 @@ class Server:
 
         self._manager = manager
 
-        self._clients = dict()
+        self._clients: dict[UUID, _Client] = dict()
 
     async def listen(self) -> None:
         async with trio.open_nursery() as nursery:
@@ -157,7 +159,8 @@ class Server:
         return [c.as_connected_client() for c in self._clients.values()]
 
     @utils.noexcept(log=_LOG)
-    async def _client_connection(self, client_stream: trio.SocketStream) -> None:
+    async def _client_connection(
+            self, client_stream: trio.SocketStream) -> None:
         _LOG.info("Received connection")
         async with client_stream:
             handle = await self._register_client(client_stream)
@@ -172,23 +175,30 @@ class Server:
                     nursery.start_soon(_send_peer, peer, client)
 
             self._clients[client.handle.uid] = client
-            try:
-                async with client_stream:
+            async with client.stream:
+                signal_peers = True
+                try:
                     await self._manage_client(client)
-            finally:
-                # FIXME: If parent nursery has been cancelled, what happens?
-                del self._clients[client.handle.uid]
-                with trio.move_on_after(1) as cleanup_scope:
-                    # TODO: Think about shielding across whole codebase
-                    cleanup_scope.shield = True
-                    async with trio.open_nursery() as nursery:
-                        # TODO: Make noexcept work when passed a function directly
-                        nursery.start_soon(utils.noexcept()(Message.Shutdown.send),
-                                           client._stream)
-                        # FIXME: Possible contention on these streams
-                        for peer in self._clients.values():
-                            nursery.start_soon(utils.noexcept()(_remove_peer),
-                                               peer, client)
+                except (KeyboardInterrupt, SystemExit, trio.Cancelled):
+                    signal_peers = False
+                    raise
+                finally:
+                    # Remove us from the client list, send a shutdown message
+                    # to the peer (if the socket is still alive!) and signal
+                    # our other clients that the peer has gone.
+                    del self._clients[client.handle.uid]
+                    with trio.move_on_after(1) as cleanup_scope:
+                        cleanup_scope.shield = True
+                        try:
+                            async with client.lock:
+                                await Message.Shutdown.send(client.stream)
+                        except STREAM_ERRORS:
+                            pass
+                        if signal_peers:
+                            async with trio.open_nursery() as nursery:
+                                for peer in self._clients.values():
+                                    nursery.start_soon(
+                                        utils.noexcept(_remove_peer), peer, client)
 
     async def _manage_client(self, client: _Client) -> None:
         _LOG.info("Connected to new client")
@@ -205,14 +215,16 @@ class Server:
                 assert messagetype == Message.ClientMessage, messagetype
                 tag = payload["tag"]
                 data = payload["data"]
-            except Exception as e:
+            except Exception:
                 _LOG.exception("Unexpected message from client")
+                raise
 
             try:
                 await self._manager.handle_client_message(
                     client.as_connected_client(), tag, data)
             except Exception as e:
-                _LOG.exception("User-code exception in handle_client_message")
+                _LOG.exception("User exception in handle_client_message")
+                raise UserError from e
 
     async def _register_client(
             self, client_stream: trio.SocketStream) -> ClientHandle:

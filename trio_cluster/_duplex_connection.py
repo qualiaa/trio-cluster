@@ -7,7 +7,7 @@ from uuid import UUID
 import trio
 
 from ._client_handle import ClientHandle
-from ._exc import *
+from ._exc import SequenceError
 from .message import Message, Status
 from . import utils
 
@@ -116,14 +116,14 @@ class _IncompleteConnection:
         return self._destination
 
     async def aclose(self):
-        # FIXME: Do we need a lock here?
         async with self._lock:
             for s in self._send, self._recv:
                 if s:
                     await s.aclose()
 
     async def _open_send_stream(self, message: Message) -> None:
-        # FIXME: Do we need a lock here?
+        # NOTE: We need a lock here to ensure an interleaved aclose waits for
+        #       self._send to be set
         async with self._lock:
             _LOG.debug("Me -> Them")
             send_stream = await trio.open_tcp_stream(self._destination.hostname,
@@ -185,7 +185,7 @@ class ConnectionManager:
                 raise SequenceError("Pong from unknown destination")
             await conn.establish_from_pong(destination, recv_stream)
         except Exception:
-            Status.Failure.send(recv_stream)
+            await Status.Failure.send(recv_stream)
             raise
         return self._complete(conn.destination.uid)
 
@@ -232,4 +232,3 @@ class ConnectionManager:
     @property
     def all(self) -> dict[UUID, _DuplexConnection | _IncompleteConnection]:
         return self._connections | self._in_progress
-

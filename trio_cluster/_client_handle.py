@@ -1,12 +1,12 @@
 import dataclasses
 from dataclasses import dataclass
-from typing import Any, Optional
-from uuid import UUID, uuid4
+from typing import Any
+from uuid import UUID
 
 
 @dataclass(slots=True)
 class ClientHandle:
-    uid: Optional[UUID]
+    uid: UUID
     hostname: str
     port: int
 
@@ -26,7 +26,11 @@ class ClientHandle:
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]):
-        return cls(**d | {"uid": UUID(bytes=d["uid"])})
+        uid = d["uid"]
+        if isinstance(uid, bytes):
+            d = d.copy()
+            d["uid"] = UUID(bytes=d["uid"])
+        return cls(**d)
 
     def to_dict(self):
         return dataclasses.asdict(self) | {"uid": self.uid.bytes}
