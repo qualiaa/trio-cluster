@@ -6,7 +6,8 @@ import cloudpickle as cpkl
 import trio
 import trio_parallel
 
-from .. import utils, constants as C
+from . import _constants as C
+from .. import utils
 from ..client import Client, Worker as WorkerBase
 
 

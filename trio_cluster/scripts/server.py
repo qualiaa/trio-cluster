@@ -4,7 +4,8 @@ from argparse import ArgumentParser
 
 import trio
 
-from .. import utils, constants as C
+from . import _constants as C
+from .. import utils
 from ..server import Server, Manager as BaseManager
 
 
