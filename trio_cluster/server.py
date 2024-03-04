@@ -14,25 +14,6 @@ from .message import Message, Status
 _LOG = getLogger(__name__)
 
 
-@dataclass(frozen=True, slots=True)
-# TODO: unique name
-class Client:
-    handle: ClientHandle
-    _stream: trio.SocketStream
-    _lock: trio.Lock
-
-    def __str__(self):
-        return str(self.handle)
-
-    def __repr__(self):
-        return f"<Client({self.handle!r})>"
-
-    async def send(self, tag: str, data: Any, pickle=False) -> None:
-        if pickle:
-            data = cpkl.dumps(data)
-        await Message.ClientMessage.send(self._stream, tag=tag, data=data)
-
-
 class Manager(ABC):
     """Implement this interface with your server logic.
 
@@ -60,7 +41,7 @@ class Manager(ABC):
     https://trio.readthedocs.io/en/stable/reference-core.html#cancellation-and-timeouts
     """
     @abstractmethod
-    async def run(self, clients: Callable[[], list[Client]]):
+    async def run(self, clients: Callable[[], list[ConnectedClient]]) -> None:
         """Manager main task. If this returns, the server will shut down.
 
         If you have no main logic and only wish to respond to messages in
@@ -95,7 +76,8 @@ class Manager(ABC):
         >>> self._nursery.start_soon(task, *args)
         """
 
-    async def handle_client_message(self, client: Client, tag: str, data: Any):
+    async def handle_client_message(
+            self, client: ConnectedClient, tag: str, data: Any) -> None:
         """Handle a message from a client.
 
         This is guaranteed not to be called before new_client for the specific
@@ -117,7 +99,7 @@ class Manager(ABC):
         docstring).
         """
 
-    async def new_client(self, client):
+    async def new_client(self, client: ConnectedClient) -> None:
         """Handle new client.
 
         You may use this method to do book-keeping and also to send clients an
@@ -131,6 +113,25 @@ class Manager(ABC):
         - see the Manager.run docstring (note also the caveats in the class
         docstring).
         """
+
+
+@dataclass(slots=True, frozen=True)
+class _Client:
+    handle: ClientHandle
+    stream: trio.SocketStream
+    lock: trio.Lock
+
+    def __str__(self):
+        return str(self.handle)
+
+    def __repr__(self):
+        return f"<Client({self.handle!r})>"
+
+    def as_connected_client(self) -> ConnectedClient:
+        return ConnectedClient(
+            handle=self.handle,
+            send=ClientMessageSender(
+                self.stream, self.lock, await_response=False))
 
 
 class Server:
@@ -152,18 +153,18 @@ class Server:
             await trio.serve_listeners(self._client_connection, listeners)
         _LOG.info("Server closing gracefully")
 
-    def _get_clients(self) -> list[Client]:
-        return list(self._clients.values())
+    def _get_clients(self) -> list[ConnectedClient]:
+        return [c.as_connected_client() for c in self._clients.values()]
 
     @utils.noexcept(log=_LOG)
     async def _client_connection(self, client_stream: trio.SocketStream) -> None:
         _LOG.info("Received connection")
         async with client_stream:
             handle = await self._register_client(client_stream)
-            client = Client(
+            client = _Client(
                 handle=handle,
-                _stream=client_stream,
-                _lock=trio.Lock())
+                stream=client_stream,
+                lock=trio.Lock())
 
             async with trio.open_nursery() as nursery:
                 # FIXME: Possible contention on these streams
@@ -189,16 +190,16 @@ class Server:
                             nursery.start_soon(utils.noexcept()(_remove_peer),
                                                peer, client)
 
-    async def _manage_client(self, client: Client) -> None:
+    async def _manage_client(self, client: _Client) -> None:
         _LOG.info("Connected to new client")
         try:
             _LOG.debug("Calling _manager.new_client")
-            await self._manager.new_client(client)
+            await self._manager.new_client(client.as_connected_client())
         except Exception as e:
             _LOG.exception("Exception in user code")
             raise UserError from e
 
-        async for msg in client._stream:
+        async for msg in client.stream:
             try:
                 messagetype, payload = Message.from_bytes(msg)
                 assert messagetype == Message.ClientMessage, messagetype
@@ -208,7 +209,8 @@ class Server:
                 _LOG.exception("Unexpected message from client")
 
             try:
-                await self._manager.handle_client_message(client, tag, data)
+                await self._manager.handle_client_message(
+                    client.as_connected_client(), tag, data)
             except Exception as e:
                 _LOG.exception("User-code exception in handle_client_message")
 
@@ -234,9 +236,13 @@ class Server:
             return client
 
 
-async def _send_peer(peer: Client, client: Client) -> None:
-    await Message.NewPeer.send(peer._stream, **client.handle.to_dict())
+async def _send_peer(peer: _Client, client: _Client) -> None:
+    _LOG.debug("Sending NewPeer %s to %s", client, peer)
+    async with peer.lock:
+        await Message.NewPeer.send(peer.stream, **client.handle.to_dict())
 
 
-async def _remove_peer(peer: Client, client: Client) -> None:
-    await Message.RemovePeer.send(peer._stream, uid=client.handle.uid.bytes)
+async def _remove_peer(peer: _Client, client: _Client) -> None:
+    _LOG.debug("Sending RemovePeer %s to %s", client, peer)
+    async with peer.lock:
+        await Message.RemovePeer.send(peer.stream, uid=client.handle.uid.bytes)

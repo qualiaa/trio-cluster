@@ -10,53 +10,15 @@ import trio
 
 from . import utils
 from ._client_handle import ClientHandle
+from ._connected_client import ConnectedClient, ClientMessageSender
 from ._duplex_connection import (
     _DuplexConnection,
     ConnectionManager)
-from ._exc import *
+from ._exc import UserError, InternalError
 from .message import Message, Status
 
 
 _LOG = getLogger(__name__)
-
-
-class ClientMessageSender:
-    def __init__(self,
-                 stream: trio.SocketStream,
-                 lock: trio.Lock,
-                 await_response=True):
-        self._stream = stream
-        self._lock = lock
-        self._await_response = await_response
-
-    async def __call__(self, tag: str, data: Any, pickle=False) -> bool:
-        # TODO: If stream has broken, need to remove peer/server
-        if pickle:
-            data = cpkl.dumps(data)
-        try:
-            async with self._lock:
-                await Message.ClientMessage.send(self._stream, tag=tag, data=data)
-        except Exception as e:
-            _LOG.exception("Error occurred while sending data")
-            return False
-        if self._await_response:
-            try:
-                await Status.Success.expect(self._stream)
-            except Exception:
-                _LOG.exception("Peer did not signal success")
-                return False
-        return True
-
-
-@dataclass(frozen=True, slots=True)
-class Peer:
-    handle: ClientHandle
-    send: ClientMessageSender
-
-
-def _peer_from_duplex_connection(conn: _DuplexConnection):
-        return Peer(handle=conn.destination, send=ClientMessageSender(
-            conn.send, conn.lock))
 
 
 class Worker(ABC):
@@ -90,9 +52,9 @@ class Worker(ABC):
     @abstractmethod
     async def run(
             self,
-            peers: Callable[[], list[Peer]],
+            peers: Callable[[], list[ConnectedClient]],
             server_send: ClientMessageSender
-    ):
+    ) -> None:
         """Worker main task. If this returns, the client will shut down.
 
         If you have no main logic and only wish to respond to messages in
@@ -127,7 +89,8 @@ class Worker(ABC):
         >>> self._nursery.start_soon(task, *args)
         """
 
-    async def handle_peer_message(self, peer_handle: ClientHandle, tag: str, data: Any):
+    async def handle_peer_message(
+            self, peer: ClientHandle, tag: str, data: Any) -> None:
         """Handle a message from a peer.
 
         peer describes the peer information, but note that you cannot reply to
@@ -149,7 +112,7 @@ class Worker(ABC):
         docstring).
         """
 
-    async def handle_server_message(self, tag: str, data: Any):
+    async def handle_server_message(self, tag: str, data: Any) -> None:
         """Handle a message from the manager.
 
         tag and data are determined by the matching call to client.send(tag,
@@ -206,12 +169,12 @@ class Client:
     async def _run_worker(self):
         try:
             await self._worker.run(
-                peers=lambda: [_peer_from_duplex_connection(conn) for conn in self._peer_connections],
+                peers=lambda: [_peer_from_duplex_connection(conn)
+                               for conn in self._peer_connections],
                 server_send=ClientMessageSender(
                     stream=self._server_stream,
                     lock=self._server_lock,
-                    await_response=False
-            ))
+                    await_response=False))
         except Exception as e:
             _LOG.exception("Worker error")
             raise UserError from e
@@ -343,3 +306,9 @@ class Client:
             raise
         _LOG.debug("Registered!")
         self._server_stream = server_stream
+
+
+def _peer_from_duplex_connection(conn: _DuplexConnection):
+    return ConnectedClient(
+        handle=conn.destination,
+        send=ClientMessageSender(conn.send, conn.lock))

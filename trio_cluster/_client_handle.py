@@ -13,6 +13,11 @@ class ClientHandle:
     def __hash__(self):
         return hash(self.uid)
 
+    def __eq__(self, o):
+        if not isinstance(o, ClientHandle):
+            return NotImplemented
+        return self.uid == o.uid
+
     def __repr__(self):
         return f"{type(self).__name__}({self.uid!r}, {self.hostname}, {self.port})"
 
