@@ -1,12 +1,14 @@
 import math
-from typing import Any, Self
 from base64 import b64encode, b64decode
 from enum import IntEnum
 from itertools import count
+from typing import Any, Self
 
+import cloudpickle as cpkl
 import msgpack
 import trio
 
+from ._exc import MessageParseError, UnexpectedMessageError
 
 _unique = count()
 
@@ -29,7 +31,8 @@ class MessageBase(IntEnum):
     @classmethod
     def from_bytes(cls, v: bytes) -> Self:
         if len(v) != cls.byte_size():
-            raise ValueError(f"{cls} is of size {cls.byte_size()} bytes, received {len(v)}")
+            raise MessageParseError(
+                f"{cls} is of size {cls.byte_size()} bytes, received {len(v)}")
         return cls(int.from_bytes(v, "little"))
 
     @classmethod
@@ -51,16 +54,17 @@ class Message(MessageBase):
             message["payload"] = kargs
         await stream.send_all(msgpack.packb(message))
 
-
     @classmethod
     def from_bytes(cls, v: bytes) -> tuple[Self, Any]:
         msg = msgpack.unpackb(v)
         try:
             messagetype = super().from_bytes(msg["messagetype"])
         except KeyError:
-            raise ValueError("No messagetype in message") from None
+            raise MessageParseError("No messagetype in message") from None
         except (ValueError, TypeError):
-            raise ValueError("Invalid messagetype in message:", msg["messagetype"]) from None
+            raise MessageParseError(
+                f"Invalid messagetype in message: {msg['messagetype']}"
+            ) from None
         return messagetype, msg.get("payload")
 
     @classmethod
@@ -71,7 +75,8 @@ class Message(MessageBase):
     async def expect(self, stream: trio.SocketStream) -> Any:
         messagetype, payload = await self.recv(stream)
         if messagetype != self:
-            raise ValueError(f"Received {messagetype.name}, expected {self.name}")
+            raise UnexpectedMessageError(
+                f"Received {messagetype.name}, expected {self.name}")
         return payload
 
 
@@ -90,4 +95,4 @@ class Status(MessageBase):
     async def expect(self, stream: trio.SocketStream) -> None:
         status = await self.recv(stream)
         if status != self:
-            raise ValueError(f"Received {status.name}, expected {self.name}")
+            raise UnexpectedMessageError(f"Received {status.name}, expected {self.name}")
