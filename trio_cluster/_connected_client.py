@@ -23,7 +23,13 @@ class ClientMessageSender:
         self._await_response = await_response
 
     async def __call__(self, tag: str, data: Any, pickle=False) -> bool:
-        # TODO: If stream has broken, need to remove peer/server
+        """Send the client-message to the destination.
+
+        If this raises, then the data has (most likely) not been sent.
+
+        If this function returns False, it means that the data has been sent,
+        but either no reply was received or the receiver signalled a failure.
+        """
         if pickle:
             data = cpkl.dumps(data)
         try:

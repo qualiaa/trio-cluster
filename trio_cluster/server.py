@@ -19,7 +19,7 @@ _LOG = getLogger(__name__)
 class Manager(ABC):
     """Implement this interface with your server logic.
 
-    Note that the methods of this interface are called in in the main thread.
+    Note that the methods of this interface are called in the main thread.
     To prevent starvation of server networking tasks, you must ensure a Trio
     checkpoint is called within a reasonable timeframe (ideally <1s). One
     way to achieve this is:

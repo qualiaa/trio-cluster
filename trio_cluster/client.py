@@ -22,7 +22,7 @@ _LOG = getLogger(__name__)
 class Worker(ABC):
     """Implement this interface with your worker logic.
 
-    Note that the methods of this interface are called in in the main thread.
+    Note that the methods of this interface are called in the main thread.
     To prevent starvation of client networking tasks, you must ensure a Trio
     checkpoint is called within a reasonable timeframe (ideally <1s). One
     way to achieve this is:
@@ -88,8 +88,11 @@ class Worker(ABC):
         """
 
     async def handle_peer_message(
-            self, peer: ClientHandle, tag: str, data: Any) -> None:
+            self, peer: ClientHandle, tag: str, data: Any) -> Optional[bool]:
         """Handle a message from a peer.
+
+        You can return False from this function to signal failure to the
+        caller.
 
         peer describes the peer information, but note that you cannot reply to
         the message from this method.
