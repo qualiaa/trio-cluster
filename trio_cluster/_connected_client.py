@@ -47,6 +47,9 @@ class ClientMessageSender:
                 return False
         return True
 
+    def __eq__(self, o):
+        raise TypeError("Cannot check ClientMessageSender for equality")
+
 
 @dataclass(frozen=True, slots=True)
 class ConnectedClient:
@@ -59,10 +62,5 @@ class ConnectedClient:
     def __repr__(self):
         return f"<ConnectedClient({self.handle!r})>"
 
-    def __hash__(self):
-        return hash(self.handle)
-
     def __eq__(self, o):
-        if not isinstance(o, ConnectedClient):
-            return NotImplemented
-        return self.handle == o.handle
+        raise TypeError("Cannot check ConnectedClient for equality")
