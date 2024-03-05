@@ -1,12 +1,15 @@
 import socket
+from collections.abc import Awaitable
 from logging import getLogger
 from functools import wraps
 from inspect import iscoroutinefunction
-from typing import NoReturn
+from typing import Callable, NoReturn, ParamSpec, TypeVar
 
 import trio
 
 _LOG = getLogger(__name__)
+_P = ParamSpec("_P")
+_T = TypeVar("_T")
 
 
 async def race(async_fn, *async_fns):
@@ -25,7 +28,7 @@ async def race(async_fn, *async_fns):
 
 
 async def every(seconds: float, func, *args, **kargs) -> NoReturn:
-    await aevery(seconds, as_coroutine(func), *args, **kargs)
+    await aevery(seconds, ascoroutinefunction(func), *args, **kargs)
 
 
 async def aevery(seconds: float, func, *args, **kargs) -> NoReturn:
@@ -63,12 +66,15 @@ def noexcept(*to_throw, log=None, catch_base=False):
     return decorator
 
 
-def as_coroutine(f):
+def ascoroutinefunction(
+        f: Callable[_P, _T] | Callable[_P, Awaitable[_T]]
+) -> Callable[_P, Awaitable[_T]]:
     """Awaitable wrapper for f."""
     if iscoroutinefunction(f):
         return f
     if not callable(f):
-        raise TypeError(f"Expected coroutine or callable, got {type(f)}.")
+        raise TypeError(
+            f"Expected coroutine function or callable, got {type(f)}.")
 
     @wraps(f)
     async def call(*args, **kargs):
@@ -76,7 +82,8 @@ def as_coroutine(f):
     return call
 
 
-async def open_tcp_stream_retry(*args, wait: float = 1, **kargs) -> trio.SocketStream:
+async def open_tcp_stream_retry(
+        *args, wait: float = 1, **kargs) -> trio.SocketStream:
     while True:
         try:
             return await trio.open_tcp_stream(*args, **kargs)
