@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
 from logging import getLogger
 from typing import Any, Callable, Optional
 from uuid import UUID, uuid4
@@ -9,10 +10,8 @@ import trio
 from . import utils
 from ._client_handle import ClientHandle
 from ._connected_client import ConnectedClient, ClientMessageSender
-from ._duplex_connection import (
-    _DuplexConnection,
-    ConnectionManager)
-from ._exc import UserError, InternalError
+from ._duplex_connection import _DuplexConnection, ConnectionManager
+from ._exc import InternalError, Shutdown, UserError
 from .message import Message, Status
 
 
@@ -146,6 +145,7 @@ class Client:
         self._server_stream: Optional[trio.SocketStream] = None
 
         self._peer_connections = ConnectionManager(self._handle)
+        self._peers: dict[UUID, _Peer] = {}
         self._nursery: trio.Nursery = None
 
     async def run(self,
@@ -167,17 +167,20 @@ class Client:
             nursery.start_soon(self._receive_server_messages)
 
         # TODO: Clean up internal state
-        _LOG.info("Client closing normally")
+        _LOG.debug("Client closing normally")
 
     async def _run_worker(self) -> None:
+        def shutdown():
+            raise Shutdown("Server connection lost")
         try:
             await self._worker.run(
-                peers=lambda: [_peer_from_duplex_connection(conn)
-                               for conn in self._peer_connections],
+                peers=lambda: [peer.as_connected_client()
+                               for peer in self._peers.values()],
                 server_send=ClientMessageSender(
                     stream=self._server_stream,
                     lock=self._server_lock,
-                    await_response=False))
+                    await_response=False,
+                    stream_failure_callback=shutdown))
         except Exception as e:
             _LOG.exception("User exception in run")
             raise UserError from e
@@ -207,10 +210,16 @@ class Client:
                 return
             case Message.NewPeer:
                 peer = ClientHandle.from_dict(payload)
+                _LOG.info("New Peer: %s", peer.uid)
                 self._nursery.start_soon(
                     self._peer_connections.initiate_noexcept, peer)
             case Message.RemovePeer:
-                await self._peer_connections.aclose(UUID(bytes=payload["uid"]))
+                uid = UUID(bytes=payload["uid"])
+                _LOG.info("Removing peer: %s", uid)
+                try:
+                    self._peers[uid].cancel_scope.cancel()
+                except KeyError:
+                    _LOG.info("No such connection: %s", uid)
             case Message.ClientMessage:
                 tag, data = payload["tag"], payload["data"]
                 try:
@@ -240,50 +249,23 @@ class Client:
         _LOG.debug("Peer received")
         match message:
             case Message.ConnectPing:
-                await self._peer_connections.establish_from_ping(peer, recv_stream)
+                conn = await self._peer_connections.establish_from_ping(
+                    peer, recv_stream)
 
             case Message.ConnectPong:
-                await self._peer_connections.establish_from_pong(peer, recv_stream)
+                conn = await self._peer_connections.establish_from_pong(
+                    peer, recv_stream)
 
             case _:
                 raise ValueError("Unhandled message:", message, payload)
 
+        peer = _Peer(peer, conn)
+        self._peers[peer.uid] = peer
         try:
-            await self._poll_peer(peer)
+            await peer.poll(self._worker)
         finally:
+            del self._peers[peer.uid]
             await self._peer_connections.aclose(peer.uid)
-
-    async def _poll_peer(self, peer: ClientHandle) -> None:
-        recv_stream = self._peer_connections[peer.uid].recv
-        async for msg in recv_stream:
-            try:
-                # TODO: Align all message parsing exceptions
-                try:
-                    messagetype, payload = Message.from_bytes(msg)
-                    assert messagetype == Message.ClientMessage, messagetype
-                    tag = payload["tag"]
-                    data = payload["data"]
-                except Exception:
-                    _LOG.warning("Unexpected message from peer")
-                    raise
-
-                try:
-                    result = await self._worker.handle_peer_message(
-                        peer, tag, data)
-                except Exception as e:
-                    _LOG.exception("User exception in handle_peer_message")
-                    raise UserError from e
-            except BaseException:
-                try:
-                    await Status.Failure.send(recv_stream)
-                except Exception:
-                    pass
-                raise
-
-            if result or result is None:
-                await Status.Success.send(recv_stream)
-            else:
-                await Status.Failure.send(recv_stream)
 
     async def _connect_to_server(self,
                                  server_hostname: str,
@@ -318,7 +300,63 @@ class Client:
         self._server_stream = server_stream
 
 
-def _peer_from_duplex_connection(conn: _DuplexConnection):
-    return ConnectedClient(
-        handle=conn.destination,
-        send=ClientMessageSender(conn.send, conn.lock))
+@dataclass(slots=True, frozen=True)
+class _Peer:
+    handle: ClientHandle
+    connection: _DuplexConnection
+    cancel_scope: trio.CancelScope = field(default_factory=trio.CancelScope)
+
+    @property
+    def uid(self):
+        return self.handle.uid
+
+    def __str__(self):
+        return str(self.handle)
+
+    def __repr__(self):
+        return f"<_Peer({self.handle!r})>"
+
+    @property
+    def lock(self):
+        return self.connection.lock
+
+    def as_connected_client(self) -> ConnectedClient:
+        return ConnectedClient(
+            handle=self.handle,
+            send=ClientMessageSender(
+                self.connection.send,
+                self.connection.lock,
+                stream_failure_callback=self.cancel_scope.cancel))
+
+    async def poll(self, worker: Worker) -> None:
+        with self.cancel_scope:
+            async for msg in self.connection.recv:
+                try:
+                    # TODO: Align all message parsing exceptions
+                    try:
+                        messagetype, payload = Message.from_bytes(msg)
+                        assert messagetype == Message.ClientMessage, messagetype
+                        tag = payload["tag"]
+                        data = payload["data"]
+                    except Exception:
+                        _LOG.exception("Unexpected message from peer")
+                        raise
+                    _LOG.debug("Received ClientMessage with tag %s", tag)
+
+                    try:
+                        result = await worker.handle_peer_message(
+                            self.handle, tag, data)
+                    except Exception as e:
+                        _LOG.exception("User exception in handle_peer_message")
+                        raise UserError from e
+                except BaseException:
+                    try:
+                        await Status.Failure.send(self.connection.recv)
+                    except Exception:
+                        pass
+                    raise
+
+                if result or result is None:
+                    await Status.Success.send(self.connection.recv)
+                else:
+                    await Status.Failure.send(self.connection.recv)

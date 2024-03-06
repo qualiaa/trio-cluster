@@ -1,26 +1,40 @@
 from logging import getLogger
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Awaitable, Callable, TypeAlias, Union
 
 import cloudpickle as cpkl
 import trio
 
+from . import utils
 from ._client_handle import ClientHandle
+from ._exc import UnexpectedMessageError
 from .message import Message, Status
 
 
 _LOG = getLogger(__name__)
 
+FailureCallback: TypeAlias = Union[
+    Callable[[], Awaitable[None]],
+    Callable[[], None]
+]
+
 
 class ClientMessageSender:
     """Callable for sending ClientMessages to a specific stream."""
-    def __init__(self,
-                 stream: trio.SocketStream,
-                 lock: trio.Lock,
-                 await_response=True):
+    def __init__(
+            self,
+            stream: trio.SocketStream,
+            lock: trio.Lock,
+            await_response=True,
+            stream_failure_callback: FailureCallback | None = None):
         self._stream = stream
         self._lock = lock
         self._await_response = await_response
+
+        self._stream_failure_callback = utils.ascoroutinefunction(
+            (lambda: None) if stream_failure_callback is None else
+            stream_failure_callback
+        )
 
     async def __call__(self, tag: str, data: Any, pickle=False) -> bool:
         """Send the client-message to the destination.
@@ -36,14 +50,23 @@ class ClientMessageSender:
             async with self._lock:
                 await Message.ClientMessage.send(
                     self._stream, tag=tag, data=data)
-        except Exception:
-            _LOG.exception("Error occurred while sending data")
-            return False
+        except trio.BrokenResourceError:
+            _LOG.debug("Calling stream failure callback")
+            await self._stream_failure_callback()
+            raise
+
+        # From this point, we return False rather than raising an exception.
         if self._await_response:
             try:
                 await Status.Success.expect(self._stream)
+            except trio.BrokenResourceError:
+                _LOG.debug("Calling stream failure callback")
+                await self._stream_failure_callback()
+                return False
+            except (trio.ClosedResourceError, UnexpectedMessageError):
+                return False
             except Exception:
-                _LOG.exception("Peer did not signal success")
+                _LOG.exception("Unexpected exception")
                 return False
         return True
 

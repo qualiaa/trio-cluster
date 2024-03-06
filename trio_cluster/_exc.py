@@ -1,6 +1,10 @@
 import trio
 
 
+class Shutdown(SystemExit):
+    """Intentional shutdown."""
+
+
 class UserError(Exception):
     """Error occurred in user code."""
 

@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from logging import getLogger
-from typing import Any, Callable
+from typing import Any, Callable, Self
 from uuid import UUID
 
 import cloudpickle as cpkl
@@ -117,25 +117,6 @@ class Manager(ABC):
         """
 
 
-@dataclass(slots=True, frozen=True)
-class _Client:
-    handle: ClientHandle
-    stream: trio.SocketStream
-    lock: trio.Lock
-
-    def __str__(self):
-        return str(self.handle)
-
-    def __repr__(self):
-        return f"<Client({self.handle!r})>"
-
-    def as_connected_client(self) -> ConnectedClient:
-        return ConnectedClient(
-            handle=self.handle,
-            send=ClientMessageSender(
-                self.stream, self.lock, await_response=False))
-
-
 class Server:
     def __init__(self, registration_key: str, port: int, manager: Manager):
         self._registration_key = registration_key
@@ -164,24 +145,22 @@ class Server:
         _LOG.info("Received connection")
         async with client_stream:
             handle = await self._register_client(client_stream)
-            client = _Client(
-                handle=handle,
-                stream=client_stream,
-                lock=trio.Lock())
+            client = _Client(handle=handle, stream=client_stream)
 
             async with trio.open_nursery() as nursery:
-                # FIXME: Possible contention on these streams
                 for peer in self._clients.values():
-                    nursery.start_soon(_send_peer, peer, client)
+                    nursery.start_soon(peer.send_peer, client)
 
-            self._clients[client.handle.uid] = client
+            self._clients[client.uid] = client
             async with client.stream:
                 signal_peers = True
+                _LOG.info("Connected to new client")
                 try:
-                    await self._manage_client(client)
+                    await client.manage(self._manager)
                 except (KeyboardInterrupt, SystemExit, trio.Cancelled):
                     signal_peers = False
                     raise
+
                 finally:
                     # Remove us from the client list, send a shutdown message
                     # to the peer (if the socket is still alive!) and signal
@@ -198,33 +177,7 @@ class Server:
                             async with trio.open_nursery() as nursery:
                                 for peer in self._clients.values():
                                     nursery.start_soon(
-                                        utils.noexcept(_remove_peer), peer, client)
-
-    async def _manage_client(self, client: _Client) -> None:
-        _LOG.info("Connected to new client")
-        try:
-            _LOG.debug("Calling _manager.new_client")
-            await self._manager.new_client(client.as_connected_client())
-        except Exception as e:
-            _LOG.exception("Exception in user code")
-            raise UserError from e
-
-        async for msg in client.stream:
-            try:
-                messagetype, payload = Message.from_bytes(msg)
-                assert messagetype == Message.ClientMessage, messagetype
-                tag = payload["tag"]
-                data = payload["data"]
-            except Exception:
-                _LOG.exception("Unexpected message from client")
-                raise
-
-            try:
-                await self._manager.handle_client_message(
-                    client.as_connected_client(), tag, data)
-            except Exception as e:
-                _LOG.exception("User exception in handle_client_message")
-                raise UserError from e
+                                        utils.noexcept(peer.remove_peer), client)
 
     async def _register_client(
             self, client_stream: trio.SocketStream) -> ClientHandle:
@@ -248,13 +201,65 @@ class Server:
             return client
 
 
-async def _send_peer(peer: _Client, client: _Client) -> None:
-    _LOG.debug("Sending NewPeer %s to %s", client, peer)
-    async with peer.lock:
-        await Message.NewPeer.send(peer.stream, **client.handle.to_dict())
+@dataclass(slots=True, frozen=True)
+class _Client:
+    handle: ClientHandle
+    stream: trio.SocketStream
+    lock: trio.Lock = field(default_factory=trio.Lock)
+    cancel_scope: trio.CancelScope = field(default_factory=trio.CancelScope)
 
+    @property
+    def uid(self):
+        return self.handle.uid
 
-async def _remove_peer(peer: _Client, client: _Client) -> None:
-    _LOG.debug("Sending RemovePeer %s to %s", client, peer)
-    async with peer.lock:
-        await Message.RemovePeer.send(peer.stream, uid=client.handle.uid.bytes)
+    def __str__(self):
+        return str(self.handle)
+
+    def __repr__(self):
+        return f"<_Client({self.handle!r})>"
+
+    def as_connected_client(self) -> ConnectedClient:
+        return ConnectedClient(
+            handle=self.handle,
+            send=ClientMessageSender(
+                self.stream,
+                self.lock,
+                await_response=False,
+                stream_failure_callback=self.cancel_scope.cancel))
+
+    async def manage(self, manager: Manager) -> None:
+        with self.cancel_scope:
+            try:
+                _LOG.debug("Calling _manager.new_client")
+                await manager.new_client(self.as_connected_client())
+            except Exception as e:
+                _LOG.exception("Exception in user code")
+                raise UserError from e
+
+            async for msg in self.stream:
+                try:
+                    messagetype, payload = Message.from_bytes(msg)
+                    assert messagetype == Message.ClientMessage, messagetype
+                    tag = payload["tag"]
+                    data = payload["data"]
+                except Exception:
+                    _LOG.exception("Unexpected message from client")
+                    raise
+                _LOG.debug("Received ClientMessage with tag %s", tag)
+
+                try:
+                    await manager.handle_client_message(
+                        self.as_connected_client(), tag, data)
+                except Exception as e:
+                    _LOG.exception("User exception in handle_client_message")
+                    raise UserError from e
+
+    async def send_peer(self, peer: Self) -> None:
+        _LOG.debug("Sending NewPeer %s to %s", peer, self)
+        async with self.lock:
+            await Message.NewPeer.send(self.stream, **peer.handle.to_dict())
+
+    async def remove_peer(self, peer: Self) -> None:
+        _LOG.debug("Sending RemovePeer %s to %s", peer, self)
+        async with self.lock:
+            await Message.RemovePeer.send(self.stream, uid=peer.handle.uid.bytes)
