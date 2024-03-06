@@ -1,6 +1,8 @@
 import logging
 import time
 from argparse import ArgumentParser
+from functools import cached_property
+from random import randbytes
 
 import trio
 
@@ -32,6 +34,12 @@ class Manager(BaseManager):
     # Lock around this
     async def new_client(self, client):
         await client.send("work_fn", A(), pickle=True)
+        await client.send("big chungus", self.big_chungus)
+        print("Sent big chungus!")
+
+    @cached_property
+    def big_chungus(self):
+        return randbytes(100*1024*1024)
 
 
 def run(args):

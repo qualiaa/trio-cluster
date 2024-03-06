@@ -19,7 +19,9 @@ class Worker(WorkerBase):
         print("Running worker!")
         async with trio.open_nursery() as nursery:
             nursery.start_soon(utils.aevery, 1, self._ping_peers, peers, server_send)
+            #nursery.start_soon(self._ping_peers_obnoxious, peers, server_send)
             nursery.start_soon(self._do_work, server_send)
+            await trio.sleep_forever()
 
     async def _ping_peers(self, peers, server_send):
         for peer in peers():
@@ -28,6 +30,10 @@ class Worker(WorkerBase):
             except Exception as e:
                 print("Error messaging peer:", type(e), *e.args)
         await server_send("ping", "Hello")
+
+    async def _ping_peers_obnoxious(self, peers, server_send):
+        while True:
+            await self._ping_peers(peers, server_send)
 
     async def _do_work(self, server_send):
         while True:
@@ -48,6 +54,7 @@ class Worker(WorkerBase):
     async def handle_server_message(self, tag: str, data: Any):
         match tag:
             case "work_fn": self._work_fn = cpkl.loads(data)
+            case "big chungus": print(f"Received big chungus: {len(data)/1024/1024} MB")
             case tag: print(f"[server] unknown tag {tag}")
 
 
