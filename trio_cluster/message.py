@@ -100,6 +100,7 @@ class Status(MessageBase):
 
 async def messages(stream, ignore_errors=False):
     backlog = bytearray()
+
     async for data in stream:
         if data == b"":
             # EOF
@@ -118,14 +119,13 @@ async def messages(stream, ignore_errors=False):
                 if len(backlog) > 100*1024*1024:
                     if not ignore_errors:
                         raise
-                    _LOG.warning("Invalid/incomplete message ignored: %s", msg)
+                    _LOG.warning("Invalid/incomplete data ignored: %s", msg)
                     backlog.clear()
-                _LOG.warning("Trying to reconstruct message")
                 break
 
         for msg in messages:
             try:
-                yield Message.from_bytes(msg["messagetype"]), msg["payload"]
+                yield Message.from_bytes(msg["messagetype"]), msg.get("payload")
             except (KeyError, TypeError, ValueError, MessageParseError):
                 if not ignore_errors:
                     raise
