@@ -58,7 +58,7 @@ class ClientMessageSender:
         # From this point, we return False rather than raising an exception.
         if self._await_response:
             try:
-                await Status.Success.expect(self._stream)
+                await Status.Success.expect_from(self._stream)
             except trio.BrokenResourceError:
                 _LOG.debug("Calling stream failure callback")
                 await self._stream_failure_callback()

@@ -12,7 +12,7 @@ from ._client_handle import ClientHandle
 from ._connected_client import ConnectedClient, ClientMessageSender
 from ._duplex_connection import _DuplexConnection, ConnectionManager
 from ._exc import InternalError, Shutdown, UserError
-from .message import Message, Status
+from .message import messages, client_messages, Message, Status
 
 
 _LOG = getLogger(__name__)
@@ -193,43 +193,36 @@ class Client:
             raise InternalError("Trying to receive without server stream")
 
         async with self._server_stream:
-            async for msg in self._server_stream:
-                await self._handle_server_message(msg)
-
-    @utils.noexcept(log=_LOG)
-    async def _handle_server_message(self, msg) -> None:
-        messagetype, payload = Message.from_bytes(msg)
-
-        _LOG.debug("%s received from server", messagetype.name)
-        # TODO: Validate full payload by message type in one step before
-        #       dispatch
-        match messagetype:
-            case Message.Shutdown:
-                self._nursery.cancel_scope.cancel()
-                _LOG.info("Server connection closed gracefully")
-                return
-            case Message.NewPeer:
-                peer = ClientHandle.from_dict(payload)
-                _LOG.info("New Peer: %s", peer.uid)
-                self._nursery.start_soon(
-                    self._peer_connections.initiate_noexcept, peer)
-            case Message.RemovePeer:
-                uid = UUID(bytes=payload["uid"])
-                _LOG.info("Removing peer: %s", uid)
-                try:
-                    self._peers[uid].cancel_scope.cancel()
-                except KeyError:
-                    _LOG.info("No such connection: %s", uid)
-            case Message.ClientMessage:
-                tag, data = payload["tag"], payload["data"]
-                try:
-                    await self._worker.handle_server_message(tag, data)
-                except Exception as e:
-                    _LOG.exception("User exception in handle_server_message")
-                    raise UserError from e
-            case _:
-                _LOG.warning("Unhandled message: %s; Payload: %s",
-                             messagetype.name, payload)
+            async for msgtype, payload in messages(self._server_stream,
+                                                   ignore_errors=True):
+                _LOG.debug("%s received from server", msgtype.name)
+                match msgtype:
+                    case Message.Shutdown:
+                        self._nursery.cancel_scope.cancel()
+                        _LOG.info("Server connection closed gracefully")
+                        return
+                    case Message.NewPeer:
+                        peer = ClientHandle.from_dict(payload)
+                        _LOG.info("New Peer: %s", peer.uid)
+                        self._nursery.start_soon(
+                            self._peer_connections.initiate_noexcept, peer)
+                    case Message.RemovePeer:
+                        uid = UUID(bytes=payload["uid"])
+                        _LOG.info("Removing peer: %s", uid)
+                        try:
+                            self._peers[uid].cancel_scope.cancel()
+                        except KeyError:
+                            _LOG.info("No such connection: %s", uid)
+                    case Message.ClientMessage:
+                        tag, data = payload["tag"], payload["data"]
+                        try:
+                            await self._worker.handle_server_message(tag, data)
+                        except Exception as e:
+                            _LOG.exception("User exception in handle_server_message")
+                            raise UserError from e
+                    case _:
+                        _LOG.warning("Unhandled message: %s; Payload: %s",
+                                     msgtype.name, payload)
 
     @utils.noexcept(log=_LOG)
     async def _handle_inbound_connection(
@@ -330,25 +323,19 @@ class _Peer:
 
     async def poll(self, worker: Worker) -> None:
         with self.cancel_scope:
-            async for msg in self.connection.recv:
-                try:
-                    # TODO: Align all message parsing exceptions
-                    try:
-                        messagetype, payload = Message.from_bytes(msg)
-                        assert messagetype == Message.ClientMessage, messagetype
-                        tag = payload["tag"]
-                        data = payload["data"]
-                    except Exception:
-                        _LOG.exception("Unexpected message from peer")
-                        raise
-                    _LOG.debug("Received ClientMessage with tag %s", tag)
+            async for tag, data in client_messages(self.connection.recv):
+                _LOG.debug("Received ClientMessage with tag %s", tag)
 
+                try:
+                    result = await worker.handle_peer_message(
+                        self.handle, tag, data)
+                except Exception as e:
                     try:
-                        result = await worker.handle_peer_message(
-                            self.handle, tag, data)
-                    except Exception as e:
-                        _LOG.exception("User exception in handle_peer_message")
-                        raise UserError from e
+                        await Status.Failure.send(self.connection.recv)
+                    except Exception:
+                        pass
+                    _LOG.exception("User exception in handle_peer_message")
+                    raise UserError from e
                 except BaseException:
                     try:
                         await Status.Failure.send(self.connection.recv)

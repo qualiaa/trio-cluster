@@ -10,8 +10,8 @@ import trio
 from . import utils
 from ._client_handle import ClientHandle
 from ._connected_client import ConnectedClient, ClientMessageSender
-from ._exc import UserError, STREAM_ERRORS
-from .message import Message, Status
+from ._exc import UnexpectedMessageError, UserError, STREAM_ERRORS
+from .message import client_messages, Message, Status
 
 _LOG = getLogger(__name__)
 
@@ -181,7 +181,7 @@ class Server:
 
     async def _register_client(
             self, client_stream: trio.SocketStream) -> ClientHandle:
-        registration_msg = await Message.ConnectPing.expect(client_stream)
+        registration_msg = await Message.ConnectPing.expect_from(client_stream)
 
         if registration_msg["key"] != self._registration_key:
             await client_stream.send_all(cpkl.dumps({"status": Status.BadKey}))
@@ -236,17 +236,8 @@ class _Client:
                 _LOG.exception("Exception in user code")
                 raise UserError from e
 
-            async for msg in self.stream:
-                try:
-                    messagetype, payload = Message.from_bytes(msg)
-                    assert messagetype == Message.ClientMessage, messagetype
-                    tag = payload["tag"]
-                    data = payload["data"]
-                except Exception:
-                    _LOG.exception("Unexpected message from client")
-                    raise
+            async for tag, data in client_messages(self.stream):
                 _LOG.debug("Received ClientMessage with tag %s", tag)
-
                 try:
                     await manager.handle_client_message(
                         self.as_connected_client(), tag, data)

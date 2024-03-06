@@ -133,7 +133,7 @@ class _IncompleteConnection:
                            port=self._me.port,
                            uid=self._me.uid.bytes)
         try:
-            await Status.Success.expect(send_stream)
+            await Status.Success.expect_from(send_stream)
         except Exception:
             # FIXME: What if we receive an aclose between message.send and
             #        Status.Success?
