@@ -27,15 +27,15 @@ class Manager(BaseManager):
         async with trio.open_nursery() as nursery:
             nursery.start_soon(utils.every, 2, print_status)
 
-    # Lock around this
     async def handle_client_message(self, client, tag, data):
         print(f"{client} {tag}: {data}")
 
-    # Lock around this
     async def new_client(self, client):
+        print("Sending work fn to", client)
         await client.send("work_fn", A(), pickle=True)
+        print("Sending big chungus to", client)
         await client.send("big chungus", self.big_chungus)
-        print("Sent big chungus!")
+        print("Sent big chungus to", client)
 
     @cached_property
     def big_chungus(self):

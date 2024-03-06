@@ -147,16 +147,15 @@ class Server:
             handle = await self._register_client(client_stream)
             client = _Client(handle=handle, stream=client_stream)
 
-            async with trio.open_nursery() as nursery:
-                for peer in self._clients.values():
-                    nursery.start_soon(peer.send_peer, client)
-
-            self._clients[client.uid] = client
             async with client.stream:
                 signal_peers = True
                 _LOG.info("Connected to new client")
                 try:
-                    await client.manage(self._manager)
+                    async with trio.open_nursery() as nursery:
+                        for peer in self._clients.values():
+                            nursery.start_soon(peer.send_peer, client)
+                        self._clients[client.uid] = client
+                        await client.manage(self._manager)
                 except (KeyboardInterrupt, SystemExit, trio.Cancelled):
                     signal_peers = False
                     raise
