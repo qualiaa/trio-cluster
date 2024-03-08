@@ -157,7 +157,7 @@ class Client:
             self._nursery = nursery
             await nursery.start(
                 trio.serve_tcp, self._handle_inbound_connection, self._handle.port)
-            _LOG.debug("Listening for peers")
+            _LOG.info("Listening for peers on port %s", self._handle.port)
 
             await self._connect_to_server(
                 server_hostname, server_port, registration_key)

@@ -13,11 +13,16 @@ from ._exc import MessageParseError, UnexpectedMessageError
 
 _LOG = getLogger(__name__)
 
+# TODO: Make this configurable
+_MAX_BACKLOG_BYTES = 100*1024*1024
 _unique = count()
+
+# FIXME: The message "protocol" here is basically insane - I just kept adding
+#        things as I needed them. Could definitely unify all of these
+#        requirements much more cleanly and with less data on the wire.
 
 
 class MessageBase(IntEnum):
-    # TODO: Replace this with a string-backed enum
     @classmethod
     def byte_size(cls) -> int:
         return 1 + int(math.log2(max(cls))//8)
@@ -108,6 +113,10 @@ async def messages(stream, ignore_errors=False):
             # EOF
             return
 
+        # Data can be fragmented or concatenated arbitarily, so we may need to
+        # reconstruct one or more (possibly incomplete) messages.
+        # Put successfully parsed messages in messages; put unparsed bytes in
+        # backlog.
         messages = []
         backlog.extend(data)
         while backlog:
@@ -118,7 +127,13 @@ async def messages(stream, ignore_errors=False):
                 msg, backlog = e.args
                 messages.append(msg)
             except ValueError:
-                if len(backlog) > 100*1024*1024:
+                # FIXME: Currently, a bad message split or infrequent
+                #        erroneous message at the front of the backlog could
+                #        cause the max length of the backlog in good messages
+                #        to build up and be discarded - a solution is to have a
+                #        sentinel marker between messages and strip to the next
+                #        such marker.
+                if len(backlog) > _MAX_BACKLOG_BYTES:
                     if not ignore_errors:
                         raise
                     _LOG.warning("Invalid/incomplete data ignored: %s", msg)
@@ -157,4 +172,4 @@ async def client_messages(stream, ignore_errors=False):
             except UnexpectedMessageError:
                 _LOG.warning("Unexpected messagetype from client: %s", msgtype.name)
             except KeyError:
-                _LOG.warning("tag or data missing: %s", str(data.keys()))
+                _LOG.warning("tag or data missing: %s", str(payload.keys()))
