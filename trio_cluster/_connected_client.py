@@ -36,7 +36,11 @@ class ClientMessageSender:
             stream_failure_callback
         )
 
-    async def __call__(self, tag: str, data: Any, pickle=False) -> bool:
+    async def __call__(self,
+                       tag: str,
+                       data: Any,
+                       pickle=False,
+                       ignore_errors=False) -> bool:
         """Send the client-message to the destination.
 
         If this raises, then the data has (most likely) not been sent.
@@ -53,7 +57,11 @@ class ClientMessageSender:
         except trio.BrokenResourceError:
             _LOG.debug("Calling stream failure callback")
             await self._stream_failure_callback()
-            raise
+            if not ignore_errors:
+                raise
+        except trio.ClosedResourceError:
+            if not ignore_errors:
+                raise
 
         # From this point, we return False rather than raising an exception.
         if self._await_response:
