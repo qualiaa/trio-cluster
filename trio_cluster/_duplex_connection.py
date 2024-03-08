@@ -8,7 +8,7 @@ import trio
 
 from ._client_handle import ClientHandle
 from ._exc import SequenceError
-from .message import Message, Status
+from ._message import Message, Status
 from . import utils
 
 

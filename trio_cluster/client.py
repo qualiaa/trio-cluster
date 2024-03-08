@@ -12,7 +12,7 @@ from ._client_handle import ClientHandle
 from ._connected_client import ConnectedClient, ClientMessageSender
 from ._duplex_connection import _DuplexConnection, ConnectionManager
 from ._exc import InternalError, Shutdown, UserError
-from .message import messages, client_messages, Message, Status
+from ._message import client_messages, messages, to_client_message, Message, Status
 
 
 _LOG = getLogger(__name__)

@@ -10,8 +10,8 @@ import trio
 from . import utils
 from ._client_handle import ClientHandle
 from ._connected_client import ConnectedClient, ClientMessageSender
-from ._exc import UnexpectedMessageError, UserError, STREAM_ERRORS
-from .message import client_messages, Message, Status
+from ._exc import UserError, STREAM_ERRORS
+from ._message import client_messages, Message, Status
 
 _LOG = getLogger(__name__)
 

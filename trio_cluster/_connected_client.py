@@ -8,7 +8,7 @@ import trio
 from . import utils
 from ._client_handle import ClientHandle
 from ._exc import UnexpectedMessageError
-from .message import Message, Status
+from ._message import Message, Status
 
 
 _LOG = getLogger(__name__)
