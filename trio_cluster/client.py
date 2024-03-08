@@ -214,7 +214,7 @@ class Client:
                         except KeyError:
                             _LOG.info("No such connection: %s", uid)
                     case Message.ClientMessage:
-                        tag, data = payload["tag"], payload["data"]
+                        tag, data = to_client_message(payload)
                         try:
                             await self._worker.handle_server_message(tag, data)
                         except Exception as e:

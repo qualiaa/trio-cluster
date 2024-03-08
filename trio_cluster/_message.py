@@ -1,9 +1,11 @@
 import math
+from collections.abc import Mapping
 from enum import IntEnum
 from itertools import count
 from logging import getLogger
 from typing import Any, Self
 
+import cloudpickle as cpkl
 import msgpack
 import trio
 
@@ -133,12 +135,18 @@ async def messages(stream, ignore_errors=False):
                 continue
 
 
+def to_client_message(payload):
+    tag, data = payload["tag"], payload["data"]
+    if isinstance(data, Mapping) and data.get("_pickled"):
+        data = cpkl.loads(data["_data"])
+    return tag, data
+
+
 async def client_messages(stream, ignore_errors=False):
     async for msgtype, payload in messages(stream, ignore_errors=ignore_errors):
         try:
             msgtype.expect(Message.ClientMessage)
-            tag, data = payload["tag"], payload["data"]
-            yield tag, data
+            yield to_client_message(payload)
         except Exception as e:
             if not ignore_errors:
                 raise

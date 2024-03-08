@@ -45,7 +45,7 @@ class ClientMessageSender:
         but either no reply was received or the receiver signalled a failure.
         """
         if pickle:
-            data = cpkl.dumps(data)
+            data = {"_pickled": True, "_data": cpkl.dumps(data)}
         try:
             async with self._lock:
                 await Message.ClientMessage.send(

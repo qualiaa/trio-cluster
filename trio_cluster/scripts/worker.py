@@ -2,7 +2,6 @@ import logging
 from argparse import ArgumentParser
 from typing import Any
 
-import cloudpickle as cpkl
 import trio
 import trio_parallel
 
@@ -53,7 +52,7 @@ class Worker(WorkerBase):
 
     async def handle_server_message(self, tag: str, data: Any):
         match tag:
-            case "work_fn": self._work_fn = cpkl.loads(data)
+            case "work_fn": self._work_fn = data
             case "big chungus": print(f"Received big chungus: {len(data)/1024/1024} MB")
             case tag: print(f"[server] unknown tag {tag}")
 
