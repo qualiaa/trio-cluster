@@ -126,18 +126,25 @@ class Server:
 
         self._clients: dict[UUID, _Client] = dict()
 
+        self._cancel_scope: trio.CancelScope = None
+
     async def listen(self) -> None:
         async with trio.open_nursery() as nursery:
-            nursery.start_soon(self._manager.run, self._get_clients)
+            self._cancel_scope = nursery.cancel_scope
+
+            nursery.start_soon(self._run_manager)
             listeners = await trio.open_tcp_listeners(self._port)
             for listener in listeners:
                 utils.set_keepalive(listener.socket)
-            _LOG.info("Listening for clients")
+            _LOG.info("Listening for clients on port %s", self._port)
             await trio.serve_listeners(self._client_connection, listeners)
         _LOG.info("Server closing gracefully")
 
-    def _get_clients(self) -> list[ConnectedClient]:
-        return [c.as_connected_client() for c in self._clients.values()]
+    async def _run_manager(self):
+        await self._manager.run(
+            lambda: [c.as_connected_client() for c in self._clients.values()])
+        # Server should shut down gracefully
+        self._cancel_scope.cancel()
 
     @utils.noexcept(log=_LOG)
     async def _client_connection(
