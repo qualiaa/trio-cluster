@@ -43,7 +43,7 @@ class Manager(ABC):
     https://trio.readthedocs.io/en/stable/reference-core.html#cancellation-and-timeouts
     """
     @abstractmethod
-    async def run(self, clients: Callable[[], list[ConnectedClient]]) -> None:
+    async def run_manager(self, clients: ActiveClientsFn) -> None:
         """Manager main task. If this returns, the server will shut down.
 
         If you have no main logic and only wish to respond to messages in
@@ -141,7 +141,7 @@ class Server:
         _LOG.info("Server closing gracefully")
 
     async def _run_manager(self):
-        await self._manager.run(
+        await self._manager.run_manager(
             lambda: [c.as_connected_client() for c in self._clients.values()])
         # Server should shut down gracefully
         self._cancel_scope.cancel()

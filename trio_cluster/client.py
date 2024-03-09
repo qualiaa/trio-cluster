@@ -47,7 +47,7 @@ class Worker(ABC):
     https://trio.readthedocs.io/en/stable/reference-core.html#cancellation-and-timeouts
     """
     @abstractmethod
-    async def run(
+    async def run_worker(
             self,
             peers: ActiveClientsFn,
             server_send: ClientMessageSender
@@ -173,7 +173,7 @@ class Client:
         def shutdown():
             raise Shutdown("Server connection lost")
         try:
-            await self._worker.run(
+            await self._worker.run_worker(
                 peers=lambda: [peer.as_connected_client()
                                for peer in self._peers.values()],
                 server_send=ClientMessageSender(
@@ -185,6 +185,7 @@ class Client:
             _LOG.exception("User exception in run")
             raise UserError from e
         # Worker has closed gracefully
+        _LOG.debug("Left _worker.run_worker")
         self._nursery.cancel_scope.cancel()
 
     async def _receive_server_messages(self) -> None:

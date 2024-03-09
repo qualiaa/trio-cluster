@@ -14,10 +14,16 @@ class Worker(WorkerBase):
     def __init__(self):
         self._work_fn = None
 
-    async def run(self, peers, server_send):
+    async def run_worker(self, peers, server_send):
         print("Running worker!")
         async with trio.open_nursery() as nursery:
             nursery.start_soon(utils.aevery, 1, self._ping_peers, peers, server_send)
+            # FIXME: There seems to be a bug with obnoxious sending - with two
+            # workers, one is getting blocked waiting for a message response. I
+            # think this makes sense: if both my peer and I are sending each
+            # other messages as fast as we can, I can never keep up with
+            # response to their messages and they'll always be waiting. But
+            # it's worth looking into whether this edge-case can be resolved.
             #nursery.start_soon(self._ping_peers_obnoxious, peers, server_send)
             nursery.start_soon(self._do_work, server_send)
             await trio.sleep_forever()
