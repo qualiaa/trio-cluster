@@ -43,17 +43,34 @@ class Manager(ABC):
     https://trio.readthedocs.io/en/stable/reference-core.html#cancellation-and-timeouts
     """
     @abstractmethod
-    async def run_manager(self, clients: ActiveClientsFn) -> None:
+    async def run_manager(
+            self,
+            clients: ActiveClientsFn,
+            *,
+            task_status: trio.TaskStatus
+    ) -> None:
         """Manager main task. If this returns, the server will shut down.
+
+        You must call task_status.started([val]) in order to initiate the
+        networking for the server. val is an optional value which will be
+        passed back to the task which started the server - this can be useful
+        if you wish to send results over a memory channel:
+
+        >>> send_chan, recv_chan = trio.open_memory_channel()
+        >>> task_status.started(recv_chan) # Caller will get recv_chan
+        >>> async for result in some_process():
+        >>>     await send_chan.send(result)  # Caller receives these messages
 
         If you have no main logic and only wish to respond to messages in
         handler methods, you must still ensure this method does not return, and
         also not block the main thread. One way to achieve this is:
 
+        >>> task_status.started()  # Remember you must call this!
         >>> await trio.sleep_forever()
 
         Alternatively, a simple loop may suffice for many purposes:
 
+        >>> task_status.started()
         >>> while True:
         >>>     ...  # One step of worker logic
         >>>     await trio.sleep(0.1)
@@ -75,7 +92,8 @@ class Manager(ABC):
 
         Then other methods can spawn sub-tasks under this nursery:
 
-        >>> self._nursery.start_soon(task, *args)
+        >>> async def handle_client_message(self, *args):
+        >>>     self._nursery.start_soon(task, *args)
         """
 
     async def handle_client_message(
@@ -126,13 +144,20 @@ class Server:
 
         self._clients: dict[UUID, _Client] = dict()
 
-        self._cancel_scope: trio.CancelScope = None
-
-    async def listen(self) -> None:
+    async def listen(
+            self,
+            *,
+            task_status: trio.TaskStatus = trio.TASK_STATUS_IGNORED
+    ) -> None:
         async with trio.open_nursery() as nursery:
-            self._cancel_scope = nursery.cancel_scope
+            # When the manager starts, it may pass a value back to us via its
+            # task_status - we should pass it back up the chain to our caller.
+            user_value = await nursery.start(self._run_manager, nursery.cancel_scope)
+            task_status.started(user_value)
 
-            nursery.start_soon(self._run_manager)
+            # Server connections use TCP keepalive to detect failures. However,
+            # there are some caveats to this, see the set_keepalive
+            # documentation for more info.
             listeners = await trio.open_tcp_listeners(self._port)
             for listener in listeners:
                 utils.set_keepalive(listener.socket)
@@ -140,11 +165,18 @@ class Server:
             await trio.serve_listeners(self._client_connection, listeners)
         _LOG.info("Server closing gracefully")
 
-    async def _run_manager(self):
-        await self._manager.run_manager(
-            lambda: [c.as_connected_client() for c in self._clients.values()])
-        # Server should shut down gracefully
-        self._cancel_scope.cancel()
+    async def _run_manager(self, main_scope: trio.CancelScope,
+                           *, task_status: trio.TaskStatus):
+        # Nursery needed for task_status baton-passing.
+        async with trio.open_nursery() as nursery:
+            user_value = await nursery.start(
+                self._manager.run_manager,
+                lambda: [c.as_connected_client()
+                         for c in self._clients.values()])
+            task_status.started(user_value)
+
+        # User's manager code has returned gracefully - server should shut down
+        main_scope.cancel()
 
     @utils.noexcept(log=_LOG)
     async def _client_connection(

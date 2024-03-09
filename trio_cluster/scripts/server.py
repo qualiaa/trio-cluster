@@ -18,7 +18,8 @@ class A():
 
 
 class Manager(BaseManager):
-    async def run_manager(self, clients):
+    async def run_manager(self, clients, *, task_status):
+        task_status.started()
         def print_status():
             print("I'm alive!")
             for i, client in enumerate(clients()):

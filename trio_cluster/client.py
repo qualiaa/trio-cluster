@@ -184,8 +184,9 @@ class Client:
         except Exception as e:
             _LOG.exception("User exception in run")
             raise UserError from e
+        finally:
+            _LOG.debug("Left _worker.run_worker")
         # Worker has closed gracefully
-        _LOG.debug("Left _worker.run_worker")
         self._nursery.cancel_scope.cancel()
 
     async def _receive_server_messages(self) -> None:
