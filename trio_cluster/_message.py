@@ -1,5 +1,6 @@
 import math
 from collections.abc import Mapping
+from contextlib import aclosing
 from enum import IntEnum
 from itertools import count
 from logging import getLogger
@@ -106,6 +107,13 @@ class Status(MessageBase):
         status.expect(self)
 
 
+def to_client_message(payload):
+    tag, data = payload["tag"], payload["data"]
+    if isinstance(data, Mapping) and data.get("_pickled"):
+        data = cpkl.loads(data["_data"])
+    return tag, data
+
+
 async def messages(stream, ignore_errors=False):
     unpacker = msgpack.Unpacker(max_buffer_size=_MAX_BACKLOG_BYTES)
     async for data in stream:
@@ -132,26 +140,20 @@ async def messages(stream, ignore_errors=False):
                 continue
 
 
-def to_client_message(payload):
-    tag, data = payload["tag"], payload["data"]
-    if isinstance(data, Mapping) and data.get("_pickled"):
-        data = cpkl.loads(data["_data"])
-    return tag, data
-
-
 async def client_messages(stream, ignore_errors=False):
-    async for msgtype, payload in messages(stream, ignore_errors=ignore_errors):
-        try:
-            msgtype.expect(Message.ClientMessage)
-            yield to_client_message(payload)
-        except Exception as e:
-            if not ignore_errors:
-                raise
+    async with aclosing(messages(stream, ignore_errors=ignore_errors)) as msgs:
+        async for msgtype, payload in msgs:
             try:
-                raise e
-            except TypeError:
-                _LOG.warning("Payload has wrong type: %s", type(payload))
-            except UnexpectedMessageError:
-                _LOG.warning("Unexpected messagetype from client: %s", msgtype.name)
-            except KeyError:
-                _LOG.warning("tag or data missing: %s", str(payload.keys()))
+                msgtype.expect(Message.ClientMessage)
+                yield to_client_message(payload)
+            except Exception as e:
+                if not ignore_errors:
+                    raise
+                try:
+                    raise e
+                except TypeError:
+                    _LOG.warning("Payload has wrong type: %s", type(payload))
+                except UnexpectedMessageError:
+                    _LOG.warning("Unexpected messagetype from client: %s", msgtype.name)
+                except KeyError:
+                    _LOG.warning("tag or data missing: %s", str(payload.keys()))

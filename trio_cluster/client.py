@@ -1,7 +1,8 @@
 from abc import ABC, abstractmethod
+from contextlib import aclosing
 from dataclasses import dataclass, field
 from logging import getLogger
-from typing import Any, Callable, Optional
+from typing import Any, Optional
 from uuid import UUID, uuid4
 
 import trio
@@ -190,9 +191,9 @@ class Client:
 
     async def _receive_server_messages(self, server_stream) -> None:
         _LOG.info("Polling server messages")
-        async with server_stream:
-            async for msgtype, payload in messages(server_stream,
-                                                   ignore_errors=True):
+        async with server_stream, aclosing(
+                messages(server_stream, ignore_errors=True)) as msgs:
+            async for msgtype, payload in msgs:
                 _LOG.debug("%s received from server", msgtype.name)
                 match msgtype:
                     case Message.Shutdown:
@@ -318,27 +319,28 @@ class _Peer:
 
     async def poll(self, worker: Worker) -> None:
         with self.cancel_scope:
-            async for tag, data in client_messages(self.connection.recv):
-                _LOG.debug("Received ClientMessage with tag %s", tag)
+            async with aclosing(client_messages(self.connection.recv)) as msgs:
+                async for tag, data in msgs:
+                    _LOG.debug("Received ClientMessage with tag %s", tag)
 
-                try:
-                    result = await worker.handle_peer_message(
-                        self.handle, tag, data)
-                except Exception as e:
                     try:
-                        await Status.Failure.send(self.connection.recv)
-                    except Exception:
-                        pass
-                    _LOG.exception("User exception in handle_peer_message")
-                    raise UserError from e
-                except BaseException:
-                    try:
-                        await Status.Failure.send(self.connection.recv)
-                    except Exception:
-                        pass
-                    raise
+                        result = await worker.handle_peer_message(
+                            self.handle, tag, data)
+                    except Exception as e:
+                        try:
+                            await Status.Failure.send(self.connection.recv)
+                        except Exception:
+                            pass
+                        _LOG.exception("User exception in handle_peer_message")
+                        raise UserError from e
+                    except BaseException:
+                        try:
+                            await Status.Failure.send(self.connection.recv)
+                        except Exception:
+                            pass
+                        raise
 
-                if result or result is None:
-                    await Status.Success.send(self.connection.recv)
-                else:
-                    await Status.Failure.send(self.connection.recv)
+                    if result or result is None:
+                        await Status.Success.send(self.connection.recv)
+                    else:
+                        await Status.Failure.send(self.connection.recv)

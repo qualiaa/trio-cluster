@@ -1,7 +1,8 @@
 from abc import ABC, abstractmethod
+from contextlib import aclosing
 from dataclasses import dataclass, field
 from logging import getLogger
-from typing import Any, Callable, Self
+from typing import Any, Self
 from uuid import UUID
 
 import trio
@@ -272,14 +273,15 @@ class _Client:
                 _LOG.exception("Exception in user code")
                 raise UserError from e
 
-            async for tag, data in client_messages(self.stream):
-                _LOG.debug("Received ClientMessage with tag %s", tag)
-                try:
-                    await manager.handle_client_message(
-                        self.as_connected_client(), tag, data)
-                except Exception as e:
-                    _LOG.exception("User exception in handle_client_message")
-                    raise UserError from e
+            async with aclosing(client_messages(self.stream)) as msgs:
+                async for tag, data in msgs:
+                    _LOG.debug("Received ClientMessage with tag %s", tag)
+                    try:
+                        await manager.handle_client_message(
+                            self.as_connected_client(), tag, data)
+                    except Exception as e:
+                        _LOG.exception("User exception in handle_client_message")
+                        raise UserError from e
 
     async def send_peer(self, peer: Self) -> None:
         _LOG.debug("Sending NewPeer %s to %s", peer, self)
