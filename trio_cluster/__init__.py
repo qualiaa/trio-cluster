@@ -1,4 +1,5 @@
 from .client import Client, Worker
 from .server import Server, Manager
-from ._connected_client import ClientMessageSender, ConnectedClient
+from ._client_handle import ClientHandle
+from ._connected_client import ActiveClientsFn, ClientMessageSender, ConnectedClient
 from ._exc import *

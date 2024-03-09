@@ -37,7 +37,7 @@ async def aevery(seconds: float, func, *args, **kargs) -> NoReturn:
         await trio.sleep(seconds)
 
 
-def get_hostname(stream) -> str:
+def get_hostname(stream: trio.SocketStream) -> str:
     return stream.socket.getpeername()[0]
 
 

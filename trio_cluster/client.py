@@ -9,7 +9,7 @@ import trio
 
 from . import utils
 from ._client_handle import ClientHandle
-from ._connected_client import ConnectedClient, ClientMessageSender
+from ._connected_client import ActiveClientsFn, ConnectedClient, ClientMessageSender
 from ._duplex_connection import _DuplexConnection, ConnectionManager
 from ._exc import InternalError, Shutdown, UserError
 from ._message import client_messages, messages, to_client_message, Message, Status
@@ -49,7 +49,7 @@ class Worker(ABC):
     @abstractmethod
     async def run(
             self,
-            peers: Callable[[], list[ConnectedClient]],
+            peers: ActiveClientsFn,
             server_send: ClientMessageSender
     ) -> None:
         """Worker main task. If this returns, the client will shut down.

@@ -13,7 +13,7 @@ from ._message import Message, Status
 
 _LOG = getLogger(__name__)
 
-FailureCallback: TypeAlias = Union[
+_FailureCallback: TypeAlias = Union[
     Callable[[], Awaitable[None]],
     Callable[[], None]
 ]
@@ -26,7 +26,7 @@ class ClientMessageSender:
             stream: trio.SocketStream,
             lock: trio.Lock,
             await_response=True,
-            stream_failure_callback: FailureCallback | None = None):
+            stream_failure_callback: _FailureCallback | None = None):
         self._stream = stream
         self._lock = lock
         self._await_response = await_response
@@ -96,3 +96,6 @@ class ConnectedClient:
 
     def __eq__(self, o):
         raise TypeError("Cannot check ConnectedClient for equality")
+
+
+ActiveClientsFn: TypeAlias = Callable[[], list[ConnectedClient]]

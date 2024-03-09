@@ -9,7 +9,7 @@ import trio
 
 from . import utils
 from ._client_handle import ClientHandle
-from ._connected_client import ConnectedClient, ClientMessageSender
+from ._connected_client import ActiveClientsFn, ClientMessageSender, ConnectedClient
 from ._exc import UserError, STREAM_ERRORS
 from ._message import client_messages, Message, Status
 
