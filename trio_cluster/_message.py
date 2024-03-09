@@ -43,6 +43,7 @@ class MessageBase(IntEnum):
 
 class Message(MessageBase):
     Shutdown = next(_unique)
+    Registration = next(_unique)
     NewPeer = next(_unique)
     RemovePeer = next(_unique)
     ConnectPing = next(_unique)
@@ -98,7 +99,7 @@ class Status(MessageBase):
 
     def expect(self, status: Self) -> None:
         if status != self:
-            raise UnexpectedMessageError(f"Received {self.name}, expected {status.name}")
+            raise UnexpectedMessageError(f"Expected {status.name}, received {self.name}")
 
     async def expect_from(self, stream: trio.SocketStream) -> None:
         status = await self.recv(stream)

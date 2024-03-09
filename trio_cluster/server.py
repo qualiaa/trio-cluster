@@ -4,7 +4,6 @@ from logging import getLogger
 from typing import Any, Callable, Self
 from uuid import UUID
 
-import cloudpickle as cpkl
 import trio
 
 from . import utils
@@ -222,7 +221,7 @@ class Server:
         registration_msg = await Message.ConnectPing.expect_from(client_stream)
 
         if registration_msg["key"] != self._registration_key:
-            await client_stream.send_all(cpkl.dumps({"status": Status.BadKey}))
+            await Message.Registration.send(client_stream, status=Status.BadKey)
             raise ValueError("Incorrect registration key")
 
         else:
@@ -231,10 +230,8 @@ class Server:
                 uid=UUID(bytes=registration_msg["uid"]),
                 port=registration_msg["port"])
 
-            await client_stream.send_all(cpkl.dumps({
-                "status": Status.Success,
-                "hostname": client.hostname
-            }))
+            await Message.Registration.send(
+                client_stream, status=Status.Success, hostname=client.hostname)
             _LOG.debug("Registered!")
             return client
 

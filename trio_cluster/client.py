@@ -4,7 +4,6 @@ from logging import getLogger
 from typing import Any, Callable, Optional
 from uuid import UUID, uuid4
 
-import cloudpickle as cpkl
 import trio
 
 from . import utils
@@ -279,13 +278,9 @@ class Client:
                 uid=self._handle.uid.bytes
             )
 
-            # TODO: No need to use cpkl here any more
-            registration_response = cpkl.loads(await server_stream.receive_some())
-
-            if registration_response["status"] == Status.BadKey:
-                raise RuntimeError("Incorrect registration key")
-            if registration_response["status"] != Status.Success:
-                raise RuntimeError("Server signalled unexplained registration failure")
+            registration_response = await Message.Registration.expect_from(
+                server_stream)
+            Status(registration_response["status"]).expect(Status.Success)
 
             self._handle.hostname = registration_response["hostname"]
         except BaseException:
