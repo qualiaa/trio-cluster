@@ -14,7 +14,7 @@ from ._exc import MessageParseError, UnexpectedMessageError
 _LOG = getLogger(__name__)
 
 # TODO: Make this configurable
-_MAX_BACKLOG_BYTES = 100*1024*1024
+_MAX_BACKLOG_BYTES = 200*1024*1024
 _unique = count()
 
 # FIXME: The message "protocol" here is basically insane - I just kept adding
@@ -106,41 +106,22 @@ class Status(MessageBase):
 
 
 async def messages(stream, ignore_errors=False):
-    backlog = bytearray()
-
+    unpacker = msgpack.Unpacker(max_buffer_size=_MAX_BACKLOG_BYTES)
     async for data in stream:
         if data == b"":
             # EOF
             return
 
-        # Data can be fragmented or concatenated arbitarily, so we may need to
-        # reconstruct one or more (possibly incomplete) messages.
-        # Put successfully parsed messages in messages; put unparsed bytes in
-        # backlog.
-        messages = []
-        backlog.extend(data)
-        while backlog:
-            try:
-                messages.append(msgpack.unpackb(backlog))
-                backlog.clear()
-            except msgpack.ExtraData as e:
-                msg, backlog = e.args
-                messages.append(msg)
-            except ValueError:
-                # FIXME: Currently, a bad message split or infrequent
-                #        erroneous message at the front of the backlog could
-                #        cause the max length of the backlog in good messages
-                #        to build up and be discarded - a solution is to have a
-                #        sentinel marker between messages and strip to the next
-                #        such marker.
-                if len(backlog) > _MAX_BACKLOG_BYTES:
-                    if not ignore_errors:
-                        raise
-                    _LOG.warning("Invalid/incomplete data ignored: %s", msg)
-                    backlog.clear()
-                break
+        try:
+            unpacker.feed(data)
+        except msgpack.BufferFull:
+            if not ignore_errors:
+                raise
+            _LOG.warning("Up to %.4g MiB could not be parsed and were discarded",
+                         _MAX_BACKLOG_BYTES/1024/1024)
+            unpacker = msgpack.Unpacker()
 
-        for msg in messages:
+        for msg in unpacker:
             try:
                 yield Message.from_bytes(msg["messagetype"]), msg.get("payload")
             except (KeyError, TypeError, ValueError, MessageParseError):
