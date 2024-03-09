@@ -10,7 +10,7 @@ from . import utils
 from ._client_handle import ClientHandle
 from ._connected_client import ActiveClientsFn, ConnectedClient, ClientMessageSender
 from ._duplex_connection import _DuplexConnection, ConnectionManager
-from ._exc import InternalError, Shutdown, UserError
+from ._exc import Shutdown, UserError
 from ._message import client_messages, messages, to_client_message, Message, Status
 
 
@@ -140,9 +140,6 @@ class Client:
 
         self._worker = worker
 
-        self._server_lock = trio.Lock()
-        self._server_stream: Optional[trio.SocketStream] = None
-
         self._peer_connections = ConnectionManager(self._handle)
         self._peers: dict[UUID, _Peer] = {}
         self._nursery: trio.Nursery = None
@@ -158,26 +155,29 @@ class Client:
                 trio.serve_tcp, self._handle_inbound_connection, self._handle.port)
             _LOG.info("Listening for peers on port %s", self._handle.port)
 
-            await self._connect_to_server(
+            server_stream = await self._connect_to_server(
                 server_hostname, server_port, registration_key)
 
-            nursery.start_soon(self._run_worker)
+            nursery.start_soon(self._run_worker, server_stream)
             # NOTE: Must start polling server after starting worker
-            nursery.start_soon(self._receive_server_messages)
+            nursery.start_soon(self._receive_server_messages, server_stream)
 
         # TODO: Clean up internal state
         _LOG.debug("Client closing normally")
 
-    async def _run_worker(self) -> None:
+    async def _run_worker(self, server_stream) -> None:
         def shutdown():
             raise Shutdown("Server connection lost")
+
+        server_lock = trio.Lock()
+
         try:
             await self._worker.run_worker(
                 peers=lambda: [peer.as_connected_client()
                                for peer in self._peers.values()],
                 server_send=ClientMessageSender(
-                    stream=self._server_stream,
-                    lock=self._server_lock,
+                    stream=server_stream,
+                    lock=server_lock,
                     await_response=False,
                     stream_failure_callback=shutdown))
         except Exception as e:
@@ -188,13 +188,10 @@ class Client:
         # Worker has closed gracefully
         self._nursery.cancel_scope.cancel()
 
-    async def _receive_server_messages(self) -> None:
+    async def _receive_server_messages(self, server_stream) -> None:
         _LOG.info("Polling server messages")
-        if self._server_stream is None:
-            raise InternalError("Trying to receive without server stream")
-
-        async with self._server_stream:
-            async for msgtype, payload in messages(self._server_stream,
+        async with server_stream:
+            async for msgtype, payload in messages(server_stream,
                                                    ignore_errors=True):
                 _LOG.debug("%s received from server", msgtype.name)
                 match msgtype:
@@ -287,7 +284,7 @@ class Client:
             await server_stream.aclose()
             raise
         _LOG.debug("Registered!")
-        self._server_stream = server_stream
+        return server_stream
 
 
 @dataclass(slots=True, frozen=True)
