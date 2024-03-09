@@ -316,6 +316,7 @@ class _Peer:
     def as_connected_client(self) -> ConnectedClient:
         return ConnectedClient(
             handle=self.handle,
+            local=utils.host_is_local(self.connection.send),
             send=ClientMessageSender(
                 self.connection.send,
                 self.connection.lock,

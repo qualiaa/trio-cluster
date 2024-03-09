@@ -41,6 +41,10 @@ def get_hostname(stream) -> str:
     return stream.socket.getpeername()[0]
 
 
+def host_is_local(stream: trio.SocketStream) -> bool:
+    # This may not be entirely foolproof
+    return socket.getfqdn(get_hostname(stream)) == socket.getfqdn()
+
 def noexcept(*to_throw, log=None, catch_base=False):
     if to_throw:
         # Special handling if first argument is a callable to wrap

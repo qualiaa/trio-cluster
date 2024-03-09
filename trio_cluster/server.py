@@ -227,6 +227,7 @@ class _Client:
     def as_connected_client(self) -> ConnectedClient:
         return ConnectedClient(
             handle=self.handle,
+            local=utils.host_is_local(self.stream),
             send=ClientMessageSender(
                 self.stream,
                 self.lock,

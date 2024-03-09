@@ -85,6 +85,7 @@ class ClientMessageSender:
 @dataclass(frozen=True, slots=True)
 class ConnectedClient:
     handle: ClientHandle
+    local: bool
     send: ClientMessageSender
 
     def __str__(self):
