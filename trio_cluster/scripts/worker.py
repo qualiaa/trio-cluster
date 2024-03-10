@@ -14,7 +14,8 @@ class Worker(WorkerBase):
     def __init__(self):
         self._work_fn = None
 
-    async def run_worker(self, peers, server_send):
+    async def run_worker(self, peers, server_send, *, task_status):
+        task_status.started()
         print("Running worker!")
         async with trio.open_nursery() as nursery:
             nursery.start_soon(utils.aevery, 1, self._ping_peers, peers, server_send)

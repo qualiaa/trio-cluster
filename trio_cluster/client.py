@@ -50,9 +50,14 @@ class Worker(ABC):
     async def run_worker(
             self,
             peers: ActiveClientsFn,
-            server_send: ClientMessageSender
+            server_send: ClientMessageSender,
+            *,
+            task_status: trio.TaskStatus
     ) -> None:
         """Worker main task. If this returns, the client will shut down.
+
+        You must call task_status.started() in order to receive messages from
+        the server.
 
         If you have no main logic and only wish to respond to messages in
         handler methods, you must still ensure this method does not return, and
@@ -142,6 +147,8 @@ class Client:
         self._peers: dict[UUID, _Peer] = {}
         self._nursery: trio.Nursery = None
 
+        self._worker_started = trio.Event()
+
     async def run(self,
                   server_hostname: str,
                   server_port: int,
@@ -155,32 +162,33 @@ class Client:
                 trio.serve_tcp, self._handle_inbound_connection, self._handle.listen_port)
             _LOG.info("Listening for peers on port %s", self._handle.listen_port)
 
-            server_stream = await self._connect_to_server(
+            server_stream = await nursery.start(
+                self._server_connection,
                 server_hostname, server_port, registration_key)
 
             nursery.start_soon(self._run_worker, server_stream)
-            # NOTE: Must start polling server after starting worker
-            nursery.start_soon(self._receive_server_messages, server_stream)
 
         # TODO: Clean up internal state
         _LOG.debug("Client closing normally")
-
 
     async def _run_worker(self, server_stream) -> None:
         def shutdown():
             raise Shutdown("Server connection lost")
 
-        server_lock = trio.Lock()
+        def peers():
+            return [p.as_connected_client() for p in self._peers.values()]
 
         try:
-            await self._worker.run_worker(
-                peers=lambda: [peer.as_connected_client()
-                               for peer in self._peers.values()],
-                server_send=ClientMessageSender(
-                    stream=server_stream,
-                    lock=server_lock,
-                    await_response=False,
-                    stream_failure_callback=shutdown))
+            async with trio.open_nursery() as nursery:
+                await nursery.start(
+                    self._worker.run_worker,
+                    peers,
+                    ClientMessageSender(
+                        stream=server_stream,
+                        lock=trio.Lock(),
+                        await_response=False,
+                        stream_failure_callback=shutdown))
+                self._worker_started.set()
         except Exception as e:
             _LOG.exception("User exception in run")
             raise UserError from e
@@ -189,41 +197,72 @@ class Client:
         # Worker has closed gracefully
         self._nursery.cancel_scope.cancel()
 
-    async def _receive_server_messages(self, server_stream) -> None:
-        _LOG.info("Polling server messages")
-        async with server_stream, aclosing(
-                messages(server_stream, ignore_errors=True)) as msgs:
-            async for msgtype, payload in msgs:
-                _LOG.debug("%s received from server", msgtype.name)
-                match msgtype:
-                    case Message.Shutdown:
-                        self._nursery.cancel_scope.cancel()
-                        _LOG.info("Server connection closed gracefully")
-                        return
-                    case Message.NewPeer:
-                        peer = await trio.to_thread.run_sync(
-                            ListenAddress.from_server_blocking,
-                            ListenAddress.from_dict(payload), self._server)
-                        _LOG.info("New Peer: %s", peer.uid)
-                        self._nursery.start_soon(
-                            self._peer_connections.initiate_noexcept, peer)
-                    case Message.RemovePeer:
-                        uid = UUID(bytes=payload["uid"])
-                        _LOG.info("Removing peer: %s", uid)
-                        try:
-                            self._peers[uid].cancel_scope.cancel()
-                        except KeyError:
-                            _LOG.info("No such connection: %s", uid)
-                    case Message.ClientMessage:
-                        tag, data = to_client_message(payload)
-                        try:
-                            await self._worker.handle_server_message(tag, data)
-                        except Exception as e:
-                            _LOG.exception("User exception in handle_server_message")
-                            raise UserError from e
-                    case _:
-                        _LOG.warning("Unhandled message: %s; Payload: %s",
-                                     msgtype.name, payload)
+    async def _server_connection(self,
+                                 server_hostname: str,
+                                 server_port: int,
+                                 registration_key: str,
+                                 *,
+                                 task_status: trio.TaskStatus
+                                 ) -> None:
+        _LOG.info("Connecting to server")
+        server_stream = await utils.open_tcp_stream_retry(server_hostname,
+                                                          server_port)
+        task_status.started(server_stream)
+        _LOG.info("Connected")
+        async with server_stream, aclosing(messages(
+                server_stream, ignore_errors=True)) as msgs:
+            await Message.ConnectPing.send(
+                server_stream,
+                key=registration_key,
+                hostname=self._handle.hostname,
+                listen_port=self._handle.listen_port,
+                uid=self._handle.uid.bytes
+            )
+
+            # TODO: Would be nice to make msgs into an object with method
+            #       .expect(type: Message) -> Payload
+            msgtype, registration_response = await anext(msgs)
+            Message.Registration.expect(msgtype)
+            Status(registration_response["status"]).expect(Status.Success)
+            _LOG.debug("Registered!")
+
+            _LOG.info("Polling server messages")
+            async for msg in msgs:
+                await self._handle_server_message(*msg)
+
+    async def _handle_server_message(self, msgtype, payload) -> None:
+        _LOG.debug("%s received from server", msgtype.name)
+        match msgtype:
+            case Message.Shutdown:
+                self._nursery.cancel_scope.cancel()
+                _LOG.info("Server connection closed gracefully")
+                return
+            case Message.NewPeer:
+                peer = await trio.to_thread.run_sync(
+                    ListenAddress.from_server_blocking,
+                    ListenAddress.from_dict(payload), self._server)
+                _LOG.info("New Peer: %s", peer.uid)
+                self._nursery.start_soon(
+                    self._peer_connections.initiate_noexcept, peer)
+            case Message.RemovePeer:
+                uid = UUID(bytes=payload["uid"])
+                _LOG.info("Removing peer: %s", uid)
+                try:
+                    self._peers[uid].cancel_scope.cancel()
+                except KeyError:
+                    _LOG.info("No such connection: %s", uid)
+            case Message.ClientMessage:
+                tag, data = to_client_message(payload)
+                try:
+                    # FIXME: Risk of blocking here
+                    await self._worker_started.wait()
+                    await self._worker.handle_server_message(tag, data)
+                except Exception as e:
+                    _LOG.exception("User exception in handle_server_message")
+                    raise UserError from e
+            case _:
+                _LOG.warning("Unhandled message: %s; Payload: %s",
+                             msgtype.name, payload)
 
     @utils.noexcept(log=_LOG)
     async def _handle_inbound_connection(
@@ -259,33 +298,6 @@ class Client:
         finally:
             del self._peers[peer.uid]
             await self._peer_connections.aclose(peer.uid)
-
-    async def _connect_to_server(self,
-                                 server_hostname: str,
-                                 server_port: int,
-                                 registration_key: str
-                                 ) -> None:
-        _LOG.info("Connecting to server")
-        server_stream = await utils.open_tcp_stream_retry(server_hostname, server_port)
-        _LOG.info("Connected")
-
-        try:
-            await Message.ConnectPing.send(
-                server_stream,
-                key=registration_key,
-                hostname=self._handle.hostname,
-                listen_port=self._handle.listen_port,
-                uid=self._handle.uid.bytes
-            )
-
-            registration_response = await Message.Registration.expect_from(
-                server_stream)
-            Status(registration_response["status"]).expect(Status.Success)
-        except BaseException:
-            await server_stream.aclose()
-            raise
-        _LOG.debug("Registered!")
-        return server_stream
 
 
 @dataclass(slots=True, frozen=True)
