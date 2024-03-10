@@ -59,8 +59,8 @@ class Message(MessageBase):
 
     @classmethod
     def from_bytes_with_payload(cls, v: bytes) -> tuple[Self, Any]:
-        msg = msgpack.unpackb(v)
         try:
+            msg = msgpack.unpackb(v)
             messagetype = cls.from_bytes(msg["messagetype"])
         except KeyError:
             raise MessageParseError("No messagetype in message") from None
@@ -68,6 +68,10 @@ class Message(MessageBase):
             raise MessageParseError(
                 f"Invalid messagetype in message: {msg['messagetype']}"
             ) from None
+        except msgpack.ExtraData as e:
+            raise MessageParseError(
+                f"Extra data received: `{e.args[1]}'"
+            )
         return messagetype, msg.get("payload")
 
     @classmethod
@@ -137,7 +141,7 @@ async def messages(stream, ignore_errors=False):
                 if not ignore_errors:
                     raise
                 _LOG.warning("Invalid/incomplete message ignored: %s", msg)
-                continue
+            await trio.lowlevel.checkpoint()
 
 
 async def client_messages(stream, ignore_errors=False):
