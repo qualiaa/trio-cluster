@@ -62,6 +62,9 @@ class Message(MessageBase):
     def from_bytes_with_payload(cls, v: bytes) -> tuple[Self, Any]:
         try:
             msg = msgpack.unpackb(v)
+        except msgpack.ExtraData as e:
+            raise MessageParseError(f"Extra data received: `{e.args[1]}'")
+        try:
             messagetype = cls.from_bytes(msg["messagetype"])
         except KeyError:
             raise MessageParseError("No messagetype in message") from None
@@ -69,10 +72,6 @@ class Message(MessageBase):
             raise MessageParseError(
                 f"Invalid messagetype in message: {msg['messagetype']}"
             ) from None
-        except msgpack.ExtraData as e:
-            raise MessageParseError(
-                f"Extra data received: `{e.args[1]}'"
-            )
         return messagetype, msg.get("payload")
 
     @classmethod
