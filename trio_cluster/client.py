@@ -159,7 +159,7 @@ class Client:
         async with trio.open_nursery() as nursery:
             self._nursery = nursery
             await nursery.start(
-                trio.serve_tcp, self._handle_inbound_connection, self._handle.listen_port)
+                trio.serve_tcp, self._inbound_connection, self._handle.listen_port)
             _LOG.info("Listening for peers on port %s", self._handle.listen_port)
 
             server_stream = await nursery.start(
@@ -265,7 +265,7 @@ class Client:
                              msgtype.name, payload)
 
     @utils.noexcept(log=_LOG)
-    async def _handle_inbound_connection(
+    async def _inbound_connection(
             self, recv_stream: trio.SocketStream) -> None:
         _LOG.info("Received connection")
         try:

@@ -100,7 +100,7 @@ class Status(IntEnum):
 
     @classmethod
     async def recv(cls, stream: trio.SocketStream) -> Self:
-        return Status(await Message.Status.expect_from(stream)["status"])
+        return Status((await Message.Status.expect_from(stream))["status"])
 
     def expect(self, status: Self) -> None:
         if status != self:
