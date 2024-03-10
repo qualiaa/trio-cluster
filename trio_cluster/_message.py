@@ -166,5 +166,5 @@ async def client_messages_from_stream(stream, ignore_errors=False):
     async with (
             aclosing(messages(stream, ignore_errors=ignore_errors)) as msgs,
             aclosing(client_messages(msgs, ignore_errors)) as client_msgs):
-        async for msg in client_messages:
+        async for msg in client_msgs:
             yield msg
