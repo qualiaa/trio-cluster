@@ -1,10 +1,10 @@
 import math
-from collections.abc import Mapping
+from collections.abc import AsyncGenerator, Mapping
 from contextlib import aclosing
 from enum import IntEnum
 from itertools import count
 from logging import getLogger
-from typing import Any, Self
+from typing import Any, Self, TypeAlias
 
 import cloudpickle as cpkl
 import msgpack
@@ -118,7 +118,12 @@ def to_client_message(payload):
     return tag, data
 
 
-async def messages(stream, ignore_errors=False):
+MessageGenerator: TypeAlias = AsyncGenerator[tuple[Message, Any], None]
+# TODO: Add Tag annotation/protocol with proper constraints
+ClientMessageGenerator: TypeAlias = AsyncGenerator[tuple[Any, Any], None]
+
+
+async def messages(stream, ignore_errors=False) -> MessageGenerator:
     unpacker = msgpack.Unpacker(max_buffer_size=_MAX_BACKLOG_BYTES)
     async for data in stream:
         if data == b"":
@@ -144,7 +149,8 @@ async def messages(stream, ignore_errors=False):
             await trio.lowlevel.checkpoint()
 
 
-async def client_messages(msgs, ignore_errors=False):
+async def client_messages(
+        msgs: MessageGenerator, ignore_errors=False) -> ClientMessageGenerator:
     async for msgtype, payload in msgs:
         try:
             msgtype.expect(Message.ClientMessage)

@@ -11,7 +11,7 @@ from . import utils
 from ._client_handle import ListenAddress
 from ._connected_client import ActiveClientsFn, ClientMessageSender, ConnectedClient
 from ._exc import UserError, STREAM_ERRORS
-from ._message import client_messages, messages, Message, Status
+from ._message import client_messages, messages, MessageGenerator, Message, Status
 
 _LOG = getLogger(__name__)
 
@@ -161,7 +161,7 @@ class _Client:
                 await_response=False,
                 stream_failure_callback=self.cancel_scope.cancel))
 
-    async def manage(self, msgs, manager: Manager) -> None:
+    async def manage(self, msgs: MessageGenerator, manager: Manager) -> None:
         with self.cancel_scope:
             try:
                 _LOG.debug("Calling _manager.new_client")
