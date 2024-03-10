@@ -1,6 +1,5 @@
 import math
 from collections.abc import AsyncGenerator, Mapping
-from contextlib import aclosing
 from enum import IntEnum
 from itertools import count
 from logging import getLogger
