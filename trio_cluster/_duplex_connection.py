@@ -6,7 +6,7 @@ from uuid import UUID
 
 import trio
 
-from ._client_handle import ClientHandle
+from ._client_handle import ListenAddress
 from ._exc import SequenceError
 from ._message import Message, Status
 from . import utils
@@ -17,7 +17,7 @@ _LOG = getLogger(__name__)
 
 @dataclass(slots=True, frozen=True)
 class _DuplexConnection:
-    destination: ClientHandle
+    destination: ListenAddress
     lock: trio.Lock
     send: trio.abc.Stream
     recv: trio.abc.Stream
@@ -39,8 +39,8 @@ class _IncompleteConnection:
     # TODO: Possibly simplify(?) with trio.Events for Ping/Pong/Complete?
     def __init__(self,
                  *,
-                 _me: ClientHandle,
-                 _destination: ClientHandle,
+                 _me: ListenAddress,
+                 _destination: ListenAddress,
                  _in_progress: dict[UUID, Self],
                  _finished: dict[UUID, _DuplexConnection],
                  _recv=None):
@@ -65,8 +65,8 @@ class _IncompleteConnection:
 
     @classmethod
     async def initiate(cls,
-                       me: ClientHandle,
-                       destination: ClientHandle,
+                       me: ListenAddress,
+                       destination: ListenAddress,
                        in_progress: dict[UUID, Self],
                        finished: dict[UUID, _DuplexConnection]) -> Self:
         """Send A -> B"""
@@ -76,8 +76,8 @@ class _IncompleteConnection:
 
     @classmethod
     async def establish_from_ping(cls,
-                                  me: ClientHandle,
-                                  destination: ClientHandle,
+                                  me: ListenAddress,
+                                  destination: ListenAddress,
                                   in_progress: dict[UUID, Self],
                                   finished: dict[UUID, _DuplexConnection],
                                   recv_stream: trio.SocketStream) -> Self:
@@ -97,7 +97,7 @@ class _IncompleteConnection:
         return self
 
     async def establish_from_pong(self,
-                                  destination: ClientHandle,
+                                  destination: ListenAddress,
                                   recv_stream: trio.SocketStream) -> None:
         """Receive B -> A"""
         if destination.uid in self._finished:
@@ -112,7 +112,7 @@ class _IncompleteConnection:
         await Status.Success.send(recv_stream)
 
     @property
-    def destination(self) -> ClientHandle:
+    def destination(self) -> ListenAddress:
         return self._destination
 
     async def aclose(self):
@@ -122,15 +122,16 @@ class _IncompleteConnection:
                     await s.aclose()
 
     async def _open_send_stream(self, message: Message) -> None:
-        # NOTE: We need a lock here to ensure an interleaved aclose waits for
-        #       self._send to be set
+        # NOTE: We need a lock here to ensure an interleaved self.aclose waits
+        #       for self._send to be set
         async with self._lock:
             _LOG.debug("Me -> Them")
-            send_stream = await trio.open_tcp_stream(self._destination.hostname,
-                                                     self._destination.port)
+            send_stream = await trio.open_tcp_stream(self._destination.addr,
+                                                     self._destination.listen_port)
             self._send = send_stream
         await message.send(send_stream,
-                           port=self._me.port,
+                           hostname=self._me.hostname,
+                           listen_port=self._me.listen_port,
                            uid=self._me.uid.bytes)
         try:
             await Status.Success.expect_from(send_stream)
@@ -151,7 +152,7 @@ class _IncompleteConnection:
 
 
 class ConnectionManager:
-    def __init__(self, handle: ClientHandle):
+    def __init__(self, handle: ListenAddress):
         self._handle = handle
 
         self._connections = {}
@@ -159,7 +160,7 @@ class ConnectionManager:
 
     async def establish_from_ping(
             self,
-            destination: ClientHandle,
+            destination: ListenAddress,
             recv_stream: trio.SocketStream
     ) -> _DuplexConnection:
         _LOG.debug("Them -> Me")
@@ -174,7 +175,7 @@ class ConnectionManager:
 
     async def establish_from_pong(
             self,
-            destination: ClientHandle,
+            destination: ListenAddress,
             recv_stream: trio.SocketStream
     ) -> _DuplexConnection:
         _LOG.debug("Them -> Me")
@@ -189,12 +190,12 @@ class ConnectionManager:
             raise
         return self._complete(conn.destination.uid)
 
-    async def initiate(self, destination: ClientHandle) -> _IncompleteConnection:
+    async def initiate(self, destination: ListenAddress) -> _IncompleteConnection:
         _LOG.debug("Starting ping connection")
         return await _IncompleteConnection.initiate(
             self._handle, destination, self._in_progress, self._connections)
 
-    @utils.noexcept("Initiating duplex connection", log=_LOG)
+    @utils.noexcept(log=_LOG)
     async def initiate_noexcept(self, *args, **kargs) -> _IncompleteConnection:
         return await self.initiate(*args, **kargs)
 

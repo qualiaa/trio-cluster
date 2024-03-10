@@ -8,7 +8,7 @@ from uuid import UUID
 import trio
 
 from . import utils
-from ._client_handle import ClientHandle
+from ._client_handle import ListenAddress
 from ._connected_client import ActiveClientsFn, ClientMessageSender, ConnectedClient
 from ._exc import UserError, STREAM_ERRORS
 from ._message import client_messages, Message, Status
@@ -138,7 +138,7 @@ class Manager(ABC):
 class Server:
     def __init__(self, registration_key: str, port: int, manager: Manager):
         self._registration_key = registration_key
-        self._port = port
+        self._listen_port = port
 
         self._manager = manager
 
@@ -158,10 +158,10 @@ class Server:
             # Server connections use TCP keepalive to detect failures. However,
             # there are some caveats to this, see the set_keepalive
             # documentation for more info.
-            listeners = await trio.open_tcp_listeners(self._port)
+            listeners = await trio.open_tcp_listeners(self._listen_port)
             for listener in listeners:
                 utils.set_keepalive(listener.socket)
-            _LOG.info("Listening for clients on port %s", self._port)
+            _LOG.info("Listening for clients on port %s", self._listen_port)
             await trio.serve_listeners(self._client_connection, listeners)
         _LOG.info("Server closing gracefully")
 
@@ -218,28 +218,29 @@ class Server:
                                         utils.noexcept(peer.remove_peer), client)
 
     async def _register_client(
-            self, client_stream: trio.SocketStream) -> ClientHandle:
+            self, client_stream: trio.SocketStream) -> ListenAddress:
         registration_msg = await Message.ConnectPing.expect_from(client_stream)
 
         if registration_msg["key"] != self._registration_key:
             await Message.Registration.send(client_stream, status=Status.BadKey)
             raise ValueError("Incorrect registration key")
 
-        else:
-            client = ClientHandle(
-                hostname=utils.get_hostname(client_stream),
-                uid=UUID(bytes=registration_msg["uid"]),
-                port=registration_msg["port"])
+        print(registration_msg)
+        del registration_msg["key"]
+        client = ListenAddress.from_inbound_connection(
+            client_stream, **registration_msg)
+        print("New client:", repr(client))
 
-            await Message.Registration.send(
-                client_stream, status=Status.Success, hostname=client.hostname)
-            _LOG.debug("Registered!")
-            return client
+        # TODO: Can just send a status message now
+        await Message.Registration.send(
+            client_stream, status=Status.Success)
+        _LOG.debug("Registered!")
+        return client
 
 
 @dataclass(slots=True, frozen=True)
 class _Client:
-    handle: ClientHandle
+    handle: ListenAddress
     stream: trio.SocketStream
     lock: trio.Lock = field(default_factory=trio.Lock)
     cancel_scope: trio.CancelScope = field(default_factory=trio.CancelScope)
@@ -257,7 +258,6 @@ class _Client:
     def as_connected_client(self) -> ConnectedClient:
         return ConnectedClient(
             handle=self.handle,
-            local=utils.host_is_local(self.stream),
             send=ClientMessageSender(
                 self.stream,
                 self.lock,

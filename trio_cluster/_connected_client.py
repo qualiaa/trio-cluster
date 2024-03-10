@@ -6,7 +6,7 @@ import cloudpickle as cpkl
 import trio
 
 from . import utils
-from ._client_handle import ClientHandle
+from ._client_handle import ListenAddress
 from ._exc import UnexpectedMessageError
 from ._message import Message, Status
 
@@ -84,8 +84,7 @@ class ClientMessageSender:
 
 @dataclass(frozen=True, slots=True)
 class ConnectedClient:
-    handle: ClientHandle
-    local: bool
+    handle: ListenAddress
     send: ClientMessageSender
 
     def __str__(self):

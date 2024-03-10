@@ -8,7 +8,7 @@ from uuid import UUID, uuid4
 import trio
 
 from . import utils
-from ._client_handle import ClientHandle
+from ._client_handle import ListenAddress
 from ._connected_client import ActiveClientsFn, ConnectedClient, ClientMessageSender
 from ._duplex_connection import _DuplexConnection, ConnectionManager
 from ._exc import Shutdown, UserError
@@ -87,7 +87,7 @@ class Worker(ABC):
         """
 
     async def handle_peer_message(
-            self, peer: ClientHandle, tag: str, data: Any) -> Optional[bool]:
+            self, peer: ListenAddress, tag: str, data: Any) -> Optional[bool]:
         """Handle a message from a peer.
 
         You can return False from this function to signal failure to the
@@ -134,12 +134,9 @@ class Worker(ABC):
 
 class Client:
     def __init__(self, port: int, worker: Worker):
-        self._handle = ClientHandle(
-            uid=uuid4(),
-            hostname="localhost",
-            port=port)
-
+        self._handle = ListenAddress.local(port)
         self._worker = worker
+        self._server = None
 
         self._peer_connections = ConnectionManager(self._handle)
         self._peers: dict[UUID, _Peer] = {}
@@ -149,12 +146,14 @@ class Client:
                   server_hostname: str,
                   server_port: int,
                   registration_key: str) -> None:
+        self._server = ListenAddress.server(server_hostname, server_port)
+        print("Server:", repr(self._server))
         _LOG.info("Starting client %s", self._handle.uid)
         async with trio.open_nursery() as nursery:
             self._nursery = nursery
             await nursery.start(
-                trio.serve_tcp, self._handle_inbound_connection, self._handle.port)
-            _LOG.info("Listening for peers on port %s", self._handle.port)
+                trio.serve_tcp, self._handle_inbound_connection, self._handle.listen_port)
+            _LOG.info("Listening for peers on port %s", self._handle.listen_port)
 
             server_stream = await self._connect_to_server(
                 server_hostname, server_port, registration_key)
@@ -165,6 +164,7 @@ class Client:
 
         # TODO: Clean up internal state
         _LOG.debug("Client closing normally")
+
 
     async def _run_worker(self, server_stream) -> None:
         def shutdown():
@@ -201,7 +201,9 @@ class Client:
                         _LOG.info("Server connection closed gracefully")
                         return
                     case Message.NewPeer:
-                        peer = ClientHandle.from_dict(payload)
+                        peer = await trio.to_thread.run_sync(
+                            ListenAddress.from_server_blocking,
+                            ListenAddress.from_dict(payload), self._server)
                         _LOG.info("New Peer: %s", peer.uid)
                         self._nursery.start_soon(
                             self._peer_connections.initiate_noexcept, peer)
@@ -229,8 +231,7 @@ class Client:
         _LOG.info("Received connection")
         try:
             message, payload = await Message.recv(recv_stream)
-            peer = ClientHandle.from_dict(
-                {"hostname": utils.get_hostname(recv_stream)} | payload)
+            peer = ListenAddress.from_inbound_connection(recv_stream, **payload)
             if peer.uid == self._handle.uid:
                 raise ValueError("UID collision")
         except Exception:
@@ -272,15 +273,14 @@ class Client:
             await Message.ConnectPing.send(
                 server_stream,
                 key=registration_key,
-                port=self._handle.port,
+                hostname=self._handle.hostname,
+                listen_port=self._handle.listen_port,
                 uid=self._handle.uid.bytes
             )
 
             registration_response = await Message.Registration.expect_from(
                 server_stream)
             Status(registration_response["status"]).expect(Status.Success)
-
-            self._handle.hostname = registration_response["hostname"]
         except BaseException:
             await server_stream.aclose()
             raise
@@ -290,7 +290,7 @@ class Client:
 
 @dataclass(slots=True, frozen=True)
 class _Peer:
-    handle: ClientHandle
+    handle: ListenAddress
     connection: _DuplexConnection
     cancel_scope: trio.CancelScope = field(default_factory=trio.CancelScope)
 
@@ -311,7 +311,6 @@ class _Peer:
     def as_connected_client(self) -> ConnectedClient:
         return ConnectedClient(
             handle=self.handle,
-            local=utils.host_is_local(self.connection.send),
             send=ClientMessageSender(
                 self.connection.send,
                 self.connection.lock,
