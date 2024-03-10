@@ -158,7 +158,6 @@ class _Client:
             send=ClientMessageSender(
                 self.stream,
                 self.lock,
-                await_response=False,
                 stream_failure_callback=self.cancel_scope.cancel))
 
     async def manage(self, msgs: MessageGenerator, manager: Manager) -> None:

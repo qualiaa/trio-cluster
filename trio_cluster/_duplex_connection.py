@@ -1,4 +1,4 @@
-from collections.abc import Iterator, Iterable
+from collections.abc import Iterator
 from dataclasses import dataclass
 from logging import getLogger
 from typing import Self
@@ -8,7 +8,7 @@ import trio
 
 from ._client_handle import ListenAddress
 from ._exc import SequenceError
-from ._message import Message, Status
+from ._message import MessageGenerator, Message, Status, messages
 from . import utils
 
 
@@ -21,6 +21,7 @@ class _DuplexConnection:
     lock: trio.Lock
     send: trio.abc.Stream
     recv: trio.abc.Stream
+    send_response: MessageGenerator
 
     def __str__(self):
         return str(self.destination)
@@ -30,6 +31,7 @@ class _DuplexConnection:
 
     async def aclose(self):
         async with self.lock:
+            await self.send_response.aclose()
             await self.send.aclose()
             await self.recv.aclose()
 
@@ -61,7 +63,8 @@ class _IncompleteConnection:
         self._recv = _recv
 
         self._lock = trio.Lock()
-        self._send = None
+        self._send: trio.SocketStream = None
+        self._send_response: MessageGenerator = None
 
     @classmethod
     async def initiate(cls,
@@ -117,7 +120,7 @@ class _IncompleteConnection:
 
     async def aclose(self):
         async with self._lock:
-            for s in self._send, self._recv:
+            for s in self._send, self._recv, self._send_response:
                 if s:
                     await s.aclose()
 
@@ -129,12 +132,16 @@ class _IncompleteConnection:
             send_stream = await trio.open_tcp_stream(self._destination.addr,
                                                      self._destination.listen_port)
             self._send = send_stream
+            self._send_response = messages(send_stream)
         await message.send(send_stream,
                            hostname=self._me.hostname,
                            listen_port=self._me.listen_port,
                            uid=self._me.uid.bytes)
         try:
-            await Status.Success.expect_from(send_stream)
+            # TODO: This can obviously be improved
+            msgtype, payload = await anext(self._send_response)
+            msgtype.expect(Message.Status)
+            Status(payload["status"]).expect(Status.Success)
         except Exception:
             # FIXME: What if we receive an aclose between message.send and
             #        Status.Success?
@@ -148,7 +155,7 @@ class _IncompleteConnection:
         if self._recv is None:
             raise SequenceError("Cannot complete connection: no recv stream")
         return _DuplexConnection(
-            destination=self._destination, lock=self._lock, send=self._send, recv=self._recv)
+            destination=self._destination, lock=self._lock, send=self._send, recv=self._recv, send_response=self._send_response)
 
 
 class ConnectionManager:

@@ -12,7 +12,14 @@ from ._client_handle import ListenAddress
 from ._connected_client import ActiveClientsFn, ConnectedClient, ClientMessageSender
 from ._duplex_connection import _DuplexConnection, ConnectionManager
 from ._exc import Shutdown, UserError
-from ._message import client_messages_from_stream, messages, to_client_message, Message, Status
+from ._message import (
+    client_messages,
+    messages,
+    to_client_message,
+    MessageGenerator,
+    Message,
+    Status
+)
 
 
 _LOG = getLogger(__name__)
@@ -186,7 +193,6 @@ class Client:
                     ClientMessageSender(
                         stream=server_stream,
                         lock=trio.Lock(),
-                        await_response=False,
                         stream_failure_callback=shutdown))
                 self._worker_started.set()
         except Exception as e:
@@ -269,36 +275,36 @@ class Client:
     async def _inbound_connection(
             self, recv_stream: trio.SocketStream) -> None:
         _LOG.info("Received connection")
-        try:
-            message, payload = await Message.recv(recv_stream)
-            peer = ListenAddress.from_inbound_connection(recv_stream, **payload)
-            if peer.uid == self._handle.uid:
-                raise ValueError("UID collision")
-        except Exception:
-            async with recv_stream:
+        async with recv_stream, aclosing(messages(recv_stream)) as msgs:
+            msgtype, payload = await anext(msgs)
+            try:
+                peer = ListenAddress.from_inbound_connection(recv_stream, **payload)
+                if peer.uid == self._handle.uid:
+                    raise ValueError("UID collision")
+            except Exception:
                 await Status.Failure.send(recv_stream)
-            raise
+                raise
 
-        _LOG.debug("Peer received")
-        match message:
-            case Message.ConnectPing:
-                conn = await self._peer_connections.establish_from_ping(
-                    peer, recv_stream)
+            _LOG.debug("Peer received")
+            match msgtype:
+                case Message.ConnectPing:
+                    conn = await self._peer_connections.establish_from_ping(
+                        peer, recv_stream)
 
-            case Message.ConnectPong:
-                conn = await self._peer_connections.establish_from_pong(
-                    peer, recv_stream)
+                case Message.ConnectPong:
+                    conn = await self._peer_connections.establish_from_pong(
+                        peer, recv_stream)
 
-            case _:
-                raise ValueError("Unhandled message:", message, payload)
+                case _:
+                    raise ValueError("Unhandled message:", msgtype, payload)
 
-        peer = _Peer(peer, conn)
-        self._peers[peer.uid] = peer
-        try:
-            await peer.poll(self._worker)
-        finally:
-            del self._peers[peer.uid]
-            await self._peer_connections.aclose(peer.uid)
+            peer = _Peer(peer, conn)
+            self._peers[peer.uid] = peer
+            try:
+                await peer.poll(msgs, self._worker)
+            finally:
+                del self._peers[peer.uid]
+                await self._peer_connections.aclose(peer.uid)
 
 
 @dataclass(slots=True, frozen=True)
@@ -327,11 +333,12 @@ class _Peer:
             send=ClientMessageSender(
                 self.connection.send,
                 self.connection.lock,
+                self.connection.send_response,
                 stream_failure_callback=self.cancel_scope.cancel))
 
-    async def poll(self, worker: Worker) -> None:
+    async def poll(self, msgs: MessageGenerator, worker: Worker) -> None:
         with self.cancel_scope:
-            async with aclosing(client_messages_from_stream(self.connection.recv)) as msgs:
+            async with aclosing(client_messages(msgs)) as msgs:
                 async for tag, data in msgs:
                     _LOG.debug("Received ClientMessage with tag %s", tag)
 

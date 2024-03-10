@@ -58,36 +58,10 @@ class Message(MessageBase):
             message["payload"] = kargs
         await stream.send_all(msgpack.packb(message))
 
-    @classmethod
-    def from_bytes_with_payload(cls, v: bytes) -> tuple[Self, Any]:
-        try:
-            msg = msgpack.unpackb(v)
-        except msgpack.ExtraData as e:
-            raise MessageParseError(f"Extra data received: `{e.args[1]}'")
-        try:
-            messagetype = cls.from_bytes(msg["messagetype"])
-        except KeyError:
-            raise MessageParseError("No messagetype in message") from None
-        except (ValueError, TypeError):
-            raise MessageParseError(
-                f"Invalid messagetype in message: {msg['messagetype']}"
-            ) from None
-        return messagetype, msg.get("payload")
-
-    @classmethod
-    async def recv(cls, stream: trio.SocketStream) -> tuple[Self, Any]:
-        msg = await stream.receive_some()
-        return cls.from_bytes_with_payload(msg)
-
     def expect(self, messagetype: Self) -> None:
         if messagetype != self:
             raise UnexpectedMessageError(
                 f"Received {self.name}, expected {messagetype.name}")
-
-    async def expect_from(self, stream: trio.SocketStream) -> Any:
-        messagetype, payload = await self.recv(stream)
-        messagetype.expect(self)
-        return payload
 
 
 class Status(IntEnum):
@@ -98,17 +72,9 @@ class Status(IntEnum):
     async def send(self, stream: trio.SocketStream) -> None:
         await Message.Status.send(stream, status=self)
 
-    @classmethod
-    async def recv(cls, stream: trio.SocketStream) -> Self:
-        return Status((await Message.Status.expect_from(stream))["status"])
-
     def expect(self, status: Self) -> None:
         if status != self:
             raise UnexpectedMessageError(f"Expected {status.name}, received {self.name}")
-
-    async def expect_from(self, stream: trio.SocketStream) -> None:
-        status = await self.recv(stream)
-        status.expect(self)
 
 
 def to_client_message(payload):
@@ -166,11 +132,3 @@ async def client_messages(
                 _LOG.warning("Unexpected messagetype from client: %s", msgtype.name)
             except KeyError:
                 _LOG.warning("tag or data missing: %s", str(payload.keys()))
-
-
-async def client_messages_from_stream(stream, ignore_errors=False):
-    async with (
-            aclosing(messages(stream, ignore_errors=ignore_errors)) as msgs,
-            aclosing(client_messages(msgs, ignore_errors)) as client_msgs):
-        async for msg in client_msgs:
-            yield msg
