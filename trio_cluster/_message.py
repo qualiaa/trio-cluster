@@ -43,6 +43,7 @@ class MessageBase(IntEnum):
 
 
 class Message(MessageBase):
+    Status = next(_unique)
     Shutdown = next(_unique)
     Registration = next(_unique)
     NewPeer = next(_unique)
@@ -90,17 +91,17 @@ class Message(MessageBase):
         return payload
 
 
-class Status(MessageBase):
-    Success = next(_unique)
-    BadKey = next(_unique)
-    Failure = next(_unique)
+class Status(IntEnum):
+    Success = 1
+    BadKey = 2
+    Failure = 3
 
     async def send(self, stream: trio.SocketStream) -> None:
-        await stream.send_all(bytes(self))
+        await Message.Status.send(stream, status=self)
 
     @classmethod
     async def recv(cls, stream: trio.SocketStream) -> Self:
-        return cls.from_bytes(await stream.receive_some())
+        return Status(await Message.Status.expect_from(stream)["status"])
 
     def expect(self, status: Self) -> None:
         if status != self:
