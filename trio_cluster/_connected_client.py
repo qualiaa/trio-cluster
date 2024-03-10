@@ -90,6 +90,10 @@ class ConnectedClient:
     handle: ListenAddress
     send: ClientMessageSender
 
+    @property
+    def local(self):
+        return self.handle.is_local
+
     def __str__(self):
         return str(self.handle)
 
