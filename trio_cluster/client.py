@@ -241,7 +241,7 @@ class Client:
                 peer = await trio.to_thread.run_sync(
                     ListenAddress.from_server_blocking,
                     ListenAddress.from_dict(payload), self._server)
-                _LOG.info("New Peer: %s", peer.uid)
+                _LOG.info("New Peer %s: %s", peer.uid, repr(peer))
                 self._nursery.start_soon(
                     self._peer_connections.initiate_noexcept, peer)
             case Message.RemovePeer:
