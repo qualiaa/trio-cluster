@@ -25,11 +25,10 @@ class ListenAddress:
         return self.uid == o.uid and self.uid is not None
 
     def __repr__(self):
-        return f"{type(self).__name__}({self.uid!r}, {self.hostname}, {self.addr}, {self.listen_port}, {self.is_local})"
+        return f"{type(self).__name__}({self.uid!r}, {self.hostname}, {self.addr}, {self.listen_port}, is_local={self.is_local})"
 
     def __str__(self):
         return f"[{'*' if self.is_local else self.hostname}:{self.listen_port}] ({self.uid.hex[:6]})"
-
 
     @classmethod
     def local(cls, listen_port, uid: UUID = None):

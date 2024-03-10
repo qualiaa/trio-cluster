@@ -3,7 +3,7 @@ from contextlib import aclosing
 from dataclasses import dataclass, field
 from logging import getLogger
 from typing import Any, Optional
-from uuid import UUID, uuid4
+from uuid import UUID
 
 import trio
 
