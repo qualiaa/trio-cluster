@@ -1,14 +1,14 @@
-from logging import getLogger
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, TypeAlias, Union
+from logging import getLogger
+from typing import Any, Awaitable, Callable, Optional, TypeAlias, Union
 
 import cloudpickle as cpkl
 import trio
 
 from . import utils
-from ._client_handle import ClientHandle
 from ._exc import UnexpectedMessageError
-from ._message import Message, Status
+from ._listen_address import ListenAddress
+from ._message import MessageGenerator, Message, Status
 
 
 _LOG = getLogger(__name__)
@@ -25,11 +25,11 @@ class ClientMessageSender:
             self,
             stream: trio.SocketStream,
             lock: trio.Lock,
-            await_response=True,
+            responses: Optional[MessageGenerator] = None,
             stream_failure_callback: _FailureCallback | None = None):
         self._stream = stream
         self._lock = lock
-        self._await_response = await_response
+        self._responses = responses
 
         self._stream_failure_callback = utils.ascoroutinefunction(
             (lambda: None) if stream_failure_callback is None else
@@ -64,10 +64,13 @@ class ClientMessageSender:
                 raise
 
         # From this point, we return False rather than raising an exception.
-        if self._await_response:
+        if self._responses:
             try:
-                await Status.Success.expect_from(self._stream)
-            except trio.BrokenResourceError:
+                # TODO: This can obviously be improved
+                msgtype, payload = await anext(self._responses)
+                msgtype.expect(Message.Status)
+                Status(payload["status"]).expect(Status.Success)
+            except (trio.BrokenResourceError, StopAsyncIteration):
                 _LOG.debug("Calling stream failure callback")
                 await self._stream_failure_callback()
                 return False
@@ -84,8 +87,7 @@ class ClientMessageSender:
 
 @dataclass(frozen=True, slots=True)
 class ConnectedClient:
-    handle: ClientHandle
-    local: bool
+    handle: ListenAddress
     send: ClientMessageSender
 
     def __str__(self):

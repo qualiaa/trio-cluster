@@ -8,10 +8,10 @@ from uuid import UUID
 import trio
 
 from . import utils
-from ._client_handle import ClientHandle
 from ._connected_client import ActiveClientsFn, ClientMessageSender, ConnectedClient
 from ._exc import UserError, STREAM_ERRORS
-from ._message import client_messages, Message, Status
+from ._message import client_messages, messages, MessageGenerator, Message, Status
+from ._listen_address import ListenAddress
 
 _LOG = getLogger(__name__)
 
@@ -135,10 +135,65 @@ class Manager(ABC):
         """
 
 
+@dataclass(slots=True, frozen=True)
+class _Client:
+    handle: ListenAddress
+    stream: trio.SocketStream
+    lock: trio.Lock = field(default_factory=trio.Lock)
+    cancel_scope: trio.CancelScope = field(default_factory=trio.CancelScope)
+
+    @property
+    def uid(self):
+        return self.handle.uid
+
+    def __str__(self):
+        return str(self.handle)
+
+    def __repr__(self):
+        return f"<_Client({self.handle!r})>"
+
+    def as_connected_client(self) -> ConnectedClient:
+        return ConnectedClient(
+            handle=self.handle,
+            send=ClientMessageSender(
+                self.stream,
+                self.lock,
+                stream_failure_callback=self.cancel_scope.cancel))
+
+    async def manage(self, msgs: MessageGenerator, manager: Manager) -> None:
+        with self.cancel_scope:
+            try:
+                _LOG.debug("Calling _manager.new_client")
+                await manager.new_client(self.as_connected_client())
+            except Exception as e:
+                _LOG.exception("Exception in user code")
+                raise UserError from e
+
+            async with aclosing(client_messages(msgs)) as msgs:
+                async for tag, data in msgs:
+                    _LOG.debug("Received ClientMessage with tag %s", tag)
+                    try:
+                        await manager.handle_client_message(
+                            self.as_connected_client(), tag, data)
+                    except Exception as e:
+                        _LOG.exception("User exception in handle_client_message")
+                        raise UserError from e
+
+    async def send_peer(self, peer: Self) -> None:
+        _LOG.debug("Sending NewPeer %s to %s", peer, self)
+        async with self.lock:
+            await Message.NewPeer.send(self.stream, **peer.handle.to_dict())
+
+    async def remove_peer(self, peer: Self) -> None:
+        _LOG.debug("Sending RemovePeer %s to %s", peer, self)
+        async with self.lock:
+            await Message.RemovePeer.send(self.stream, uid=peer.handle.uid.bytes)
+
+
 class Server:
     def __init__(self, registration_key: str, port: int, manager: Manager):
         self._registration_key = registration_key
-        self._port = port
+        self._listen_port = port
 
         self._manager = manager
 
@@ -158,10 +213,10 @@ class Server:
             # Server connections use TCP keepalive to detect failures. However,
             # there are some caveats to this, see the set_keepalive
             # documentation for more info.
-            listeners = await trio.open_tcp_listeners(self._port)
+            listeners = await trio.open_tcp_listeners(self._listen_port)
             for listener in listeners:
                 utils.set_keepalive(listener.socket)
-            _LOG.info("Listening for clients on port %s", self._port)
+            _LOG.info("Listening for clients on port %s", self._listen_port)
             await trio.serve_listeners(self._client_connection, listeners)
         _LOG.info("Server closing gracefully")
 
@@ -171,8 +226,7 @@ class Server:
         async with trio.open_nursery() as nursery:
             user_value = await nursery.start(
                 self._manager.run_manager,
-                lambda: [c.as_connected_client()
-                         for c in self._clients.values()])
+                lambda: [c.as_connected_client() for c in self._clients.values()])
             task_status.started(user_value)
 
         # User's manager code has returned gracefully - server should shut down
@@ -182,113 +236,56 @@ class Server:
     async def _client_connection(
             self, client_stream: trio.SocketStream) -> None:
         _LOG.info("Received connection")
-        async with client_stream:
-            handle = await self._register_client(client_stream)
-            client = _Client(handle=handle, stream=client_stream)
+        async with client_stream, aclosing(messages(client_stream)) as msgs:
+            reg_msg = await anext(msgs)
+            # TODO: Replace c = reg(...) => async with Client(...) as c
+            client = await self._register_client(reg_msg, client_stream)
 
-            async with client.stream:
-                signal_peers = True
-                _LOG.info("Connected to new client")
-                try:
-                    async with trio.open_nursery() as nursery:
-                        for peer in self._clients.values():
-                            nursery.start_soon(peer.send_peer, client)
-                        self._clients[client.uid] = client
-                        await client.manage(self._manager)
-                except (KeyboardInterrupt, SystemExit, trio.Cancelled):
-                    signal_peers = False
-                    raise
+            signal_peers = True
+            _LOG.info("Connected to new client")
+            try:
+                async with trio.open_nursery() as nursery:
+                    for peer in self._clients.values():
+                        nursery.start_soon(peer.send_peer, client)
+                    self._clients[client.uid] = client
+                    await client.manage(msgs, self._manager)
+            except (KeyboardInterrupt, SystemExit, trio.Cancelled):
+                signal_peers = False
+                raise
 
-                finally:
-                    # Remove us from the client list, send a shutdown message
-                    # to the peer (if the socket is still alive!) and signal
-                    # our other clients that the peer has gone.
-                    del self._clients[client.handle.uid]
-                    with trio.move_on_after(1) as cleanup_scope:
-                        cleanup_scope.shield = True
-                        try:
-                            async with client.lock:
-                                await Message.Shutdown.send(client.stream)
-                        except STREAM_ERRORS:
-                            pass
-                        if signal_peers:
-                            async with trio.open_nursery() as nursery:
-                                for peer in self._clients.values():
-                                    nursery.start_soon(
-                                        utils.noexcept(peer.remove_peer), client)
+            finally:
+                # Remove us from the client list, send a shutdown message
+                # to the peer (if the socket is still alive!) and signal
+                # our other clients that the peer has gone.
+                del self._clients[client.handle.uid]
+                with trio.move_on_after(1) as cleanup_scope:
+                    cleanup_scope.shield = True
+                    try:
+                        async with client.lock:
+                            await Message.Shutdown.send(client.stream)
+                    except STREAM_ERRORS:
+                        pass
+                    if signal_peers:
+                        async with trio.open_nursery() as nursery:
+                            for peer in self._clients.values():
+                                nursery.start_soon(
+                                    utils.noexcept(peer.remove_peer), client)
 
     async def _register_client(
-            self, client_stream: trio.SocketStream) -> ClientHandle:
-        registration_msg = await Message.ConnectPing.expect_from(client_stream)
+            self, reg_msg, client_stream: trio.SocketStream) -> _Client:
+
+        msgtype, registration_msg = reg_msg
+        msgtype.expect(Message.Registration)
 
         if registration_msg["key"] != self._registration_key:
-            await Message.Registration.send(client_stream, status=Status.BadKey)
+            await Status.BadKey.send(client_stream)
             raise ValueError("Incorrect registration key")
 
-        else:
-            client = ClientHandle(
-                hostname=utils.get_hostname(client_stream),
-                uid=UUID(bytes=registration_msg["uid"]),
-                port=registration_msg["port"])
+        del registration_msg["key"]
+        client = ListenAddress.from_inbound_connection(
+            client_stream, **registration_msg)
+        print("New client:", repr(client))
 
-            await Message.Registration.send(
-                client_stream, status=Status.Success, hostname=client.hostname)
-            _LOG.debug("Registered!")
-            return client
-
-
-@dataclass(slots=True, frozen=True)
-class _Client:
-    handle: ClientHandle
-    stream: trio.SocketStream
-    lock: trio.Lock = field(default_factory=trio.Lock)
-    cancel_scope: trio.CancelScope = field(default_factory=trio.CancelScope)
-
-    @property
-    def uid(self):
-        return self.handle.uid
-
-    def __str__(self):
-        return str(self.handle)
-
-    def __repr__(self):
-        return f"<_Client({self.handle!r})>"
-
-    def as_connected_client(self) -> ConnectedClient:
-        return ConnectedClient(
-            handle=self.handle,
-            local=utils.host_is_local(self.stream),
-            send=ClientMessageSender(
-                self.stream,
-                self.lock,
-                await_response=False,
-                stream_failure_callback=self.cancel_scope.cancel))
-
-    async def manage(self, manager: Manager) -> None:
-        with self.cancel_scope:
-            try:
-                _LOG.debug("Calling _manager.new_client")
-                await manager.new_client(self.as_connected_client())
-            except Exception as e:
-                _LOG.exception("Exception in user code")
-                raise UserError from e
-
-            async with aclosing(client_messages(self.stream)) as msgs:
-                async for tag, data in msgs:
-                    _LOG.debug("Received ClientMessage with tag %s", tag)
-                    try:
-                        await manager.handle_client_message(
-                            self.as_connected_client(), tag, data)
-                    except Exception as e:
-                        _LOG.exception("User exception in handle_client_message")
-                        raise UserError from e
-
-    async def send_peer(self, peer: Self) -> None:
-        _LOG.debug("Sending NewPeer %s to %s", peer, self)
-        async with self.lock:
-            await Message.NewPeer.send(self.stream, **peer.handle.to_dict())
-
-    async def remove_peer(self, peer: Self) -> None:
-        _LOG.debug("Sending RemovePeer %s to %s", peer, self)
-        async with self.lock:
-            await Message.RemovePeer.send(self.stream, uid=peer.handle.uid.bytes)
+        await Status.Success.send(client_stream)
+        _LOG.debug("Registered!")
+        return _Client(handle=client, stream=client_stream)

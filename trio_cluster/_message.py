@@ -1,10 +1,10 @@
 import math
-from collections.abc import Mapping
+from collections.abc import AsyncGenerator, Mapping
 from contextlib import aclosing
 from enum import IntEnum
 from itertools import count
 from logging import getLogger
-from typing import Any, Self
+from typing import Any, Self, TypeAlias
 
 import cloudpickle as cpkl
 import msgpack
@@ -43,6 +43,7 @@ class MessageBase(IntEnum):
 
 
 class Message(MessageBase):
+    Status = next(_unique)
     Shutdown = next(_unique)
     Registration = next(_unique)
     NewPeer = next(_unique)
@@ -57,58 +58,23 @@ class Message(MessageBase):
             message["payload"] = kargs
         await stream.send_all(msgpack.packb(message))
 
-    @classmethod
-    def from_bytes_with_payload(cls, v: bytes) -> tuple[Self, Any]:
-        try:
-            msg = msgpack.unpackb(v)
-            messagetype = cls.from_bytes(msg["messagetype"])
-        except KeyError:
-            raise MessageParseError("No messagetype in message") from None
-        except (ValueError, TypeError):
-            raise MessageParseError(
-                f"Invalid messagetype in message: {msg['messagetype']}"
-            ) from None
-        except msgpack.ExtraData as e:
-            raise MessageParseError(
-                f"Extra data received: `{e.args[1]}'"
-            )
-        return messagetype, msg.get("payload")
-
-    @classmethod
-    async def recv(cls, stream: trio.SocketStream) -> tuple[Self, Any]:
-        msg = await stream.receive_some()
-        return cls.from_bytes_with_payload(msg)
-
     def expect(self, messagetype: Self) -> None:
         if messagetype != self:
             raise UnexpectedMessageError(
                 f"Received {self.name}, expected {messagetype.name}")
 
-    async def expect_from(self, stream: trio.SocketStream) -> Any:
-        messagetype, payload = await self.recv(stream)
-        messagetype.expect(self)
-        return payload
 
-
-class Status(MessageBase):
-    Success = next(_unique)
-    BadKey = next(_unique)
-    Failure = next(_unique)
+class Status(IntEnum):
+    Success = 1
+    BadKey = 2
+    Failure = 3
 
     async def send(self, stream: trio.SocketStream) -> None:
-        await stream.send_all(bytes(self))
-
-    @classmethod
-    async def recv(cls, stream: trio.SocketStream) -> Self:
-        return cls.from_bytes(await stream.receive_some())
+        await Message.Status.send(stream, status=self)
 
     def expect(self, status: Self) -> None:
         if status != self:
             raise UnexpectedMessageError(f"Expected {status.name}, received {self.name}")
-
-    async def expect_from(self, stream: trio.SocketStream) -> None:
-        status = await self.recv(stream)
-        status.expect(self)
 
 
 def to_client_message(payload):
@@ -118,7 +84,12 @@ def to_client_message(payload):
     return tag, data
 
 
-async def messages(stream, ignore_errors=False):
+MessageGenerator: TypeAlias = AsyncGenerator[tuple[Message, Any], None]
+# TODO: Add Tag annotation/protocol with proper constraints
+ClientMessageGenerator: TypeAlias = AsyncGenerator[tuple[Any, Any], None]
+
+
+async def messages(stream, ignore_errors=False) -> MessageGenerator:
     unpacker = msgpack.Unpacker(max_buffer_size=_MAX_BACKLOG_BYTES)
     async for data in stream:
         if data == b"":
@@ -144,20 +115,20 @@ async def messages(stream, ignore_errors=False):
             await trio.lowlevel.checkpoint()
 
 
-async def client_messages(stream, ignore_errors=False):
-    async with aclosing(messages(stream, ignore_errors=ignore_errors)) as msgs:
-        async for msgtype, payload in msgs:
+async def client_messages(
+        msgs: MessageGenerator, ignore_errors=False) -> ClientMessageGenerator:
+    async for msgtype, payload in msgs:
+        try:
+            msgtype.expect(Message.ClientMessage)
+            yield to_client_message(payload)
+        except Exception as e:
+            if not ignore_errors:
+                raise
             try:
-                msgtype.expect(Message.ClientMessage)
-                yield to_client_message(payload)
-            except Exception as e:
-                if not ignore_errors:
-                    raise
-                try:
-                    raise e
-                except TypeError:
-                    _LOG.warning("Payload has wrong type: %s", type(payload))
-                except UnexpectedMessageError:
-                    _LOG.warning("Unexpected messagetype from client: %s", msgtype.name)
-                except KeyError:
-                    _LOG.warning("tag or data missing: %s", str(payload.keys()))
+                raise e
+            except TypeError:
+                _LOG.warning("Payload has wrong type: %s", type(payload))
+            except UnexpectedMessageError:
+                _LOG.warning("Unexpected messagetype from client: %s", msgtype.name)
+            except KeyError:
+                _LOG.warning("tag or data missing: %s", str(payload.keys()))
