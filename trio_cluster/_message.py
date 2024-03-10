@@ -144,20 +144,27 @@ async def messages(stream, ignore_errors=False):
             await trio.lowlevel.checkpoint()
 
 
-async def client_messages(stream, ignore_errors=False):
-    async with aclosing(messages(stream, ignore_errors=ignore_errors)) as msgs:
-        async for msgtype, payload in msgs:
+async def client_messages(msgs, ignore_errors=False):
+    async for msgtype, payload in msgs:
+        try:
+            msgtype.expect(Message.ClientMessage)
+            yield to_client_message(payload)
+        except Exception as e:
+            if not ignore_errors:
+                raise
             try:
-                msgtype.expect(Message.ClientMessage)
-                yield to_client_message(payload)
-            except Exception as e:
-                if not ignore_errors:
-                    raise
-                try:
-                    raise e
-                except TypeError:
-                    _LOG.warning("Payload has wrong type: %s", type(payload))
-                except UnexpectedMessageError:
-                    _LOG.warning("Unexpected messagetype from client: %s", msgtype.name)
-                except KeyError:
-                    _LOG.warning("tag or data missing: %s", str(payload.keys()))
+                raise e
+            except TypeError:
+                _LOG.warning("Payload has wrong type: %s", type(payload))
+            except UnexpectedMessageError:
+                _LOG.warning("Unexpected messagetype from client: %s", msgtype.name)
+            except KeyError:
+                _LOG.warning("tag or data missing: %s", str(payload.keys()))
+
+
+async def client_messages_from_stream(stream, ignore_errors=False):
+    async with (
+            aclosing(messages(stream, ignore_errors=ignore_errors)) as msgs,
+            aclosing(client_messages(msgs, ignore_errors)) as client_msgs):
+        async for msg in client_messages:
+            yield msg

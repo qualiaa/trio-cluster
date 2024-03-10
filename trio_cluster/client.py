@@ -12,7 +12,7 @@ from ._client_handle import ListenAddress
 from ._connected_client import ActiveClientsFn, ConnectedClient, ClientMessageSender
 from ._duplex_connection import _DuplexConnection, ConnectionManager
 from ._exc import Shutdown, UserError
-from ._message import client_messages, messages, to_client_message, Message, Status
+from ._message import client_messages_from_stream, messages, to_client_message, Message, Status
 
 
 _LOG = getLogger(__name__)
@@ -211,7 +211,7 @@ class Client:
         _LOG.info("Connected")
         async with server_stream, aclosing(messages(
                 server_stream, ignore_errors=True)) as msgs:
-            await Message.ConnectPing.send(
+            await Message.Registration.send(
                 server_stream,
                 key=registration_key,
                 hostname=self._handle.hostname,
@@ -221,9 +221,10 @@ class Client:
 
             # TODO: Would be nice to make msgs into an object with method
             #       .expect(type: Message) -> Payload
-            msgtype, registration_response = await anext(msgs)
-            Message.Registration.expect(msgtype)
-            Status(registration_response["status"]).expect(Status.Success)
+            msgtype, status = await anext(msgs)
+            msgtype.expect(Message.Status)
+
+            Status(status["status"]).expect(Status.Success)
             _LOG.debug("Registered!")
 
             _LOG.info("Polling server messages")
@@ -330,7 +331,7 @@ class _Peer:
 
     async def poll(self, worker: Worker) -> None:
         with self.cancel_scope:
-            async with aclosing(client_messages(self.connection.recv)) as msgs:
+            async with aclosing(client_messages_from_stream(self.connection.recv)) as msgs:
                 async for tag, data in msgs:
                     _LOG.debug("Received ClientMessage with tag %s", tag)
 
