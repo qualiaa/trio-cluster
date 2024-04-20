@@ -78,19 +78,20 @@ class Worker(ABC):
         >>>     ...  # One step of worker logic
         >>>     await trio.sleep(0.1)
 
-        peers is a callable which returns a list of *currently active*
+        peers is a callable which returns a list of *currently connected*
         peers. Calling peers() may yield different results on either side
-        of a Trio checkpoint -- at the moment this method is invoked, peers()
-        should return the empty list. You should call it repeatedly in order to
-        get an up-to-date list.
+        of a Trio checkpoint. If run_worker() has not hit a single checkpoint,
+        peers() should return the empty list. You should not cache the result
+        of calling it, but call it whenever needed to get an up-to-date list.
 
         This method runs in its own task. In order to allow other methods to
-        parent their tasks to this one, you should open a nursery here and
+        parent their tasks to this one, you can open a nursery here and
         store it as an attribute:
 
         >>> async with trio.open_nursery() as nursery:
         >>>     self._nursery = nursery  # Make nursery available to
-        >>>                              # handle_client_message
+        >>>                              # handle_peer_message
+        >>>                              # and handle_server_message
         >>>     ... # Do something to keep nursery alive (e.g. trio.sleep_forever())
 
         Then other methods can spawn sub-tasks under this nursery:
@@ -135,12 +136,12 @@ class Worker(ABC):
         >>>     case "command_b": ...  # Process command B
         >>>     ...
 
-        Note: This function is called within the server's dedicated task. Due
+        Note: This function is called within the client's dedicated task. Due
         to this, you should aim to return as quickly as possible to avoid a
-        backlog of messages from the server. If a message instigates a long
-        computation or ongoing process, you should parent it to your main task
-        - see the Worker.run docstring (note also the caveats in the class
-        docstring).
+        backlog of messages from peers and the server. If a message instigates
+        a long computation or ongoing process, you should run it in a separate
+        function which you parent to your main task nursery - see the
+        Worker.run docstring (note also the caveats in the class docstring).
         """
 
 
