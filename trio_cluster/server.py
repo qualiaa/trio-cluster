@@ -222,12 +222,9 @@ class Server:
 
     async def _run_manager(self, main_scope: trio.CancelScope,
                            *, task_status: trio.TaskStatus):
-        # Nursery needed for task_status baton-passing.
-        async with trio.open_nursery() as nursery:
-            user_value = await nursery.start(
-                self._manager.run_manager,
-                lambda: [c.as_connected_client() for c in self._clients.values()])
-            task_status.started(user_value)
+        await self._manager.run_manager(
+            lambda: [c.as_connected_client() for c in self._clients.values()],
+            task_status=task_status)
 
         # User's manager code has returned gracefully - server should shut down
         main_scope.cancel()
