@@ -56,6 +56,7 @@ class Worker(ABC):
     @abstractmethod
     async def run_worker(
             self,
+            uid: UUID,
             peers: ActiveClientsFn,
             server_send: ClientMessageSender,
             *,
@@ -190,6 +191,7 @@ class Client:
             async with trio.open_nursery() as nursery:
                 await nursery.start(
                     self._worker.run_worker,
+                    self._handle.uid,
                     peers,
                     ClientMessageSender(
                         stream=server_stream,
