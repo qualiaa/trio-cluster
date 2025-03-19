@@ -232,14 +232,15 @@ class Server:
     @utils.noexcept(log=_LOG)
     async def _client_connection(
             self, client_stream: trio.SocketStream) -> None:
-        _LOG.info("Received connection")
+        connection_addr = client_stream.socket.getpeername()[0]
+        _LOG.info("New attempted client connection: %s", connection_addr)
         async with client_stream, aclosing(messages(client_stream)) as msgs:
             reg_msg = await anext(msgs)
             # TODO: Replace c = reg(...) => async with Client(...) as c
             client = await self._register_client(reg_msg, client_stream)
+            _LOG.info("Registered client %s", repr(client))
 
             signal_peers = True
-            _LOG.info("Connected to new client")
             try:
                 async with trio.open_nursery() as nursery:
                     for peer in self._clients.values():
@@ -281,8 +282,6 @@ class Server:
         del registration_msg["key"]
         client = ListenAddress.from_inbound_connection(
             client_stream, **registration_msg)
-        print("New client:", repr(client))
 
         await Status.Success.send(client_stream)
-        _LOG.debug("Registered!")
         return _Client(handle=client, stream=client_stream)

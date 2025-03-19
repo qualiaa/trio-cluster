@@ -55,7 +55,7 @@ def noexcept(*to_throw, log=None, catch_base=False):
             except to_throw:
                 raise
             except catch as e:
-                (log or _LOG).warning(
+                (log or _LOG).exception(
                     "Ignoring exception in %s: %s %s ",
                     f.__qualname__, type(e), e.args)
         return wrapped

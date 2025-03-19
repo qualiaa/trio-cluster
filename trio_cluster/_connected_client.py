@@ -71,10 +71,16 @@ class ClientMessageSender:
                 msgtype.expect(Message.Status)
                 Status(payload["status"]).expect(Status.Success)
             except (trio.BrokenResourceError, StopAsyncIteration):
+                _LOG.error("Could not receive response from client: broken stream.")
                 _LOG.debug("Calling stream failure callback")
                 await self._stream_failure_callback()
                 return False
-            except (trio.ClosedResourceError, UnexpectedMessageError):
+            except trio.ClosedResourceError:
+                _LOG.error("Sending client message failed: closed stream.")
+                # FIXME: Should this call the stream failure callback?
+                return False
+            except UnexpectedMessageError:
+                _LOG.error("Sending client message failed: bad response.")
                 return False
             except Exception:
                 _LOG.exception("Unexpected exception")
