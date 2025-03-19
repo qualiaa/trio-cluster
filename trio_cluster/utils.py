@@ -31,10 +31,17 @@ async def every(seconds: float, func, *args, **kargs) -> NoReturn:
     await aevery(seconds, ascoroutinefunction(func), *args, **kargs)
 
 
-async def aevery(seconds: float, func, *args, **kargs) -> NoReturn:
+async def aevery(seconds: float, func, *args, start_immediately=True, **kargs) -> NoReturn:
+    next_time = trio.current_time()
+    if not start_immediately:
+        next_time += seconds
     while True:
+        # Always sleep in order to yield
+        current_time = trio.current_time()
+        await trio.sleep(max(0, next_time - current_time))
+        next_time += seconds
+
         await func(*args, **kargs)
-        await trio.sleep(seconds)
 
 
 def noexcept(*to_throw, log=None, catch_base=False):
